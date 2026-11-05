@@ -109,9 +109,12 @@ pub fn parse(text: &str, cfg: &NluCfg, now: chrono::DateTime<Local>) -> NluQuery
         ..Default::default()
     };
 
-    // 1) 「最近 3 天」「三天内」这类带数字的相对时间，词表写不全，引擎自己解析
-    if let Some(spec) = scan_relative(&src, &mut used) {
-        apply_time(&mut q, &spec, now);
+    // 1) 先让时间语法引擎扫一遍：「上个月5号」「10月1日到10月7日」「最近三个月」
+    //    这类说法词表写不全，交给专门的规则解析器。认到就把字消耗掉，词表不再重复吃。
+    if let Some((from, to, label)) = crate::grammar::scan(&src, &mut used, now) {
+        q.from_ms = from;
+        q.to_ms = to;
+        q.label = label;
     }
 
     // 2) 词表最长匹配
@@ -296,7 +299,7 @@ fn apply_time(q: &mut NluQuery, spec: &str, now: chrono::DateTime<Local>) {
     }
 }
 
-fn day_start(d: NaiveDate) -> i64 {
+pub(crate) fn day_start(d: NaiveDate) -> i64 {
     let naive = d.and_hms_opt(0, 0, 0).unwrap();
     // 夏令时切换日可能没有 00:00，退回 UTC 也不会差太多
     Local
@@ -413,73 +416,6 @@ fn amount_label(n: i64, unit: char) -> String {
 }
 
 // ============================================================================
-// 「最近 3 天 / 三天内 / 过去两周」：数字 + 单位，词表写不尽，引擎自己认
-// ============================================================================
-
-fn scan_relative(src: &[char], used: &mut [bool]) -> Option<String> {
-    let n = src.len();
-    let mut i = 0;
-    while i < n {
-        if !src[i].is_ascii_digit() {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        let mut num = String::new();
-        while i < n && src[i].is_ascii_digit() {
-            num.push(src[i]);
-            i += 1;
-        }
-        // 单位
-        let Some((unit, unit_len)) = match_unit(src, i) else {
-            continue;
-        };
-        let after = i + unit_len;
-
-        // 后缀「内 / 以内 / 之内」，或前缀「最近 / 过去 / 近 / 前」
-        let has_suffix = after < n
-            && (src[after] == '内'
-                || (after + 1 < n && src[after] == '以' && src[after + 1] == '内')
-                || (after + 1 < n && src[after] == '之' && src[after + 1] == '内'));
-        let has_prefix = (start >= 2 && src[start - 2] == '最' && src[start - 1] == '近')
-            || (start >= 2 && src[start - 2] == '过' && src[start - 1] == '去')
-            || (start >= 1 && (src[start - 1] == '近' || src[start - 1] == '前'));
-
-        if !has_suffix && !has_prefix {
-            continue;
-        }
-        let value: i64 = num.parse().ok()?;
-        if value <= 0 || value > 3650 {
-            continue;
-        }
-        // 标记消耗：数字 + 单位 + 修饰词
-        let from_used = if has_prefix { start.saturating_sub(2) } else { start };
-        let to_used = if has_suffix { (after + 2).min(n) } else { after };
-        for k in from_used..to_used {
-            used[k] = true;
-        }
-        return Some(format!("recent:{value}{}", unit));
-    }
-    None
-}
-
-fn match_unit(src: &[char], i: usize) -> Option<(char, usize)> {
-    let rest: String = src[i..].iter().take(3).collect();
-    for (pat, unit) in [("个月", 'M'), ("星期", 'w'), ("礼拜", 'w'), ("小时", 'h')] {
-        if rest.starts_with(pat) {
-            return Some((unit, pat.chars().count()));
-        }
-    }
-    match src.get(i)? {
-        '天' | '日' => Some(('d', 1)),
-        '周' => Some(('w', 1)),
-        '月' => Some(('M', 1)),
-        '年' => Some(('y', 1)),
-        _ => None,
-    }
-}
-
-// ============================================================================
 // 测试：把需求里给的两个例句钉死，改词表或改引擎时不会悄悄退化
 // ============================================================================
 
@@ -529,9 +465,127 @@ mod tests {
         let now = at(2026, 11, 5, 10);
         let q = parse("最近3天改过的表格", &cfg(), now);
         assert_eq!(q.field, "mtime");
-        assert_eq!(q.to_ms, now.timestamp_millis());
-        assert_eq!(q.from_ms, (now - Duration::days(3)).timestamp_millis());
+        // 按自然日算：今天整天都算「最近 3 天」，所以右端是明天 0 点
+        assert_eq!(q.to_ms, day_start(NaiveDate::from_ymd_opt(2026, 11, 6).unwrap()));
+        assert_eq!(q.from_ms, day_start(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap()));
         assert!(q.exts.contains(&"xlsx".to_string()));
+    }
+
+    /// 需求里的原句：上个月下载的 pdf
+    #[test]
+    fn last_month_downloaded_pdf() {
+        let q = parse("上个月下载的pdf", &cfg(), at(2026, 11, 5, 10));
+        assert_eq!(q.exts, vec!["pdf"]);
+        assert_eq!(q.field, "ctime", "「下载」应当落到创建时间");
+        assert_eq!(q.keyword, "");
+        assert_eq!(q.label, "上个月");
+        assert_eq!(
+            (q.from_ms, q.to_ms),
+            (
+                day_start(NaiveDate::from_ymd_opt(2026, 10, 1).unwrap()),
+                day_start(NaiveDate::from_ymd_opt(2026, 11, 1).unwrap())
+            )
+        );
+    }
+
+    /// 去年 8 月改过的表格：年份用中文相对词，月份是数字
+    #[test]
+    fn last_year_august_word() {
+        let q = parse("去年8月改过的表格", &cfg(), at(2026, 11, 5, 10));
+        assert_eq!(q.field, "mtime");
+        assert_eq!(
+            (q.from_ms, q.to_ms),
+            (
+                day_start(NaiveDate::from_ymd_opt(2025, 8, 1).unwrap()),
+                day_start(NaiveDate::from_ymd_opt(2025, 9, 1).unwrap())
+            )
+        );
+        assert_eq!(q.keyword, "");
+    }
+
+    /// 具体某一天：2026年10月3日
+    #[test]
+    fn exact_day() {
+        let q = parse("2026年10月3日的pdf", &cfg(), at(2026, 11, 5, 10));
+        assert_eq!(q.exts, vec!["pdf"]);
+        assert_eq!(
+            (q.from_ms, q.to_ms),
+            (
+                day_start(NaiveDate::from_ymd_opt(2026, 10, 3).unwrap()),
+                day_start(NaiveDate::from_ymd_opt(2026, 10, 4).unwrap())
+            )
+        );
+    }
+
+    /// 区间：10月1日到10月7日
+    #[test]
+    fn date_span() {
+        let q = parse("10月1日到10月7日的截图", &cfg(), at(2026, 11, 5, 10));
+        assert!(q.exts.contains(&"png".to_string()));
+        assert_eq!(
+            (q.from_ms, q.to_ms),
+            (
+                day_start(NaiveDate::from_ymd_opt(2026, 10, 1).unwrap()),
+                day_start(NaiveDate::from_ymd_opt(2026, 10, 8).unwrap())
+            )
+        );
+        assert_eq!(q.keyword, "");
+    }
+
+    /// 上个月 5 号：月份词 + 具体日
+    #[test]
+    fn last_month_5th() {
+        let q = parse("上个月5号拍的视频", &cfg(), at(2026, 11, 5, 10));
+        assert!(q.exts.contains(&"mp4".to_string()));
+        assert_eq!(
+            (q.from_ms, q.to_ms),
+            (
+                day_start(NaiveDate::from_ymd_opt(2026, 10, 5).unwrap()),
+                day_start(NaiveDate::from_ymd_opt(2026, 10, 6).unwrap())
+            )
+        );
+        assert_eq!(q.keyword, "", "「拍的」应当被当成语气词吃掉");
+    }
+
+    /// 去年第三季度
+    #[test]
+    fn last_year_q3() {
+        let q = parse("去年第三季度的报告", &cfg(), at(2026, 11, 5, 10));
+        assert_eq!(q.keyword, "报告");
+        assert_eq!(
+            (q.from_ms, q.to_ms),
+            (
+                day_start(NaiveDate::from_ymd_opt(2025, 7, 1).unwrap()),
+                day_start(NaiveDate::from_ymd_opt(2025, 10, 1).unwrap())
+            )
+        );
+    }
+
+    /// 最近三个月：中文数字 + 个月
+    #[test]
+    fn recent_three_months() {
+        let q = parse("最近三个月下载的视频", &cfg(), at(2026, 11, 5, 10));
+        assert!(q.exts.contains(&"mp4".to_string()));
+        assert_eq!(
+            (q.from_ms, q.to_ms),
+            (
+                day_start(NaiveDate::from_ymd_opt(2026, 8, 5).unwrap()),
+                day_start(NaiveDate::from_ymd_opt(2026, 11, 6).unwrap())
+            )
+        );
+    }
+
+    /// 上周三：周词 + 星期几
+    #[test]
+    fn last_wednesday() {
+        let q = parse("上周三的截图", &cfg(), at(2026, 11, 5, 10));
+        assert_eq!(
+            (q.from_ms, q.to_ms),
+            (
+                day_start(NaiveDate::from_ymd_opt(2026, 10, 28).unwrap()),
+                day_start(NaiveDate::from_ymd_opt(2026, 10, 29).unwrap())
+            )
+        );
     }
 
     /// 关键词要留下：时间词、类型词、语气词去掉，剩下的才是关键词
@@ -561,5 +615,78 @@ mod tests {
         assert_eq!(q.from_ms, 0);
         assert!(q.exts.is_empty());
         assert!(q.score < 0.4);
+    }
+
+    /// 数字不能被误当成时间：版本号、容量、数量都要留着当关键词
+    #[test]
+    fn numbers_are_not_dates() {
+        for s in ["版本3.5的pdf", "一共5个文件", "3小时的录音", "2019"] {
+            let q = parse(s, &cfg(), at(2026, 11, 5, 10));
+            assert_eq!(q.from_ms, 0, "「{s}」不该被解析成时间：{}", q.label);
+        }
+    }
+
+    /// 「上个月到现在」= 从左端一直到现在
+    #[test]
+    fn open_ended_span() {
+        let q = parse("上个月到现在的pdf", &cfg(), at(2026, 11, 5, 10));
+        assert_eq!(q.from_ms, day_start(NaiveDate::from_ymd_opt(2026, 10, 1).unwrap()));
+        assert_eq!(q.to_ms, day_start(NaiveDate::from_ymd_opt(2026, 11, 6).unwrap()));
+    }
+
+    /// 「去年」单独出现就是整年
+    #[test]
+    fn last_year_alone() {
+        let q = parse("去年的pdf", &cfg(), at(2026, 11, 5, 10));
+        assert_eq!(
+            (q.from_ms, q.to_ms),
+            (
+                day_start(NaiveDate::from_ymd_opt(2025, 1, 1).unwrap()),
+                day_start(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap())
+            )
+        );
+    }
+
+    /// 「3天前」是过去某一天，不是区间
+    #[test]
+    fn days_ago_point() {
+        let q = parse("3天前的pdf", &cfg(), at(2026, 11, 5, 10));
+        assert_eq!(
+            (q.from_ms, q.to_ms),
+            (
+                day_start(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap()),
+                day_start(NaiveDate::from_ymd_opt(2026, 11, 3).unwrap())
+            )
+        );
+    }
+
+    /// 没有「最近」前缀，靠「内」也能成立：三天内 / 半个月内 / 半年内
+    #[test]
+    fn inner_suffix_without_prefix() {
+        for (s, days) in [("三天内的word", 3), ("半个月内的word", 15)] {
+            let q = parse(s, &cfg(), at(2026, 11, 5, 10));
+            assert_eq!(q.keyword, "", "「{s}」不该把时间词漏进关键词");
+            assert_eq!(q.from_ms, day_start(NaiveDate::from_ymd_opt(2026, 11, 5).unwrap())
+                .checked_sub(days * 86_400_000)
+                .unwrap());
+        }
+        let q = parse("半年内下载的安装包", &cfg(), at(2026, 11, 5, 10));
+        assert_eq!(q.keyword, "");
+        assert!(q.from_ms > 0);
+        assert!(q.exts.contains(&"exe".to_string()));
+    }
+
+    /// 「去年底」：年份词 + 底，不能把「底」漏成关键词
+    #[test]
+    fn year_end() {
+        let q = parse("去年底的合同", &cfg(), at(2026, 11, 5, 10));
+        assert_eq!(q.keyword, "合同");
+        assert_eq!(
+            (q.from_ms, q.to_ms),
+            (
+                day_start(NaiveDate::from_ymd_opt(2025, 12, 1).unwrap()),
+                day_start(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap())
+            )
+        );
     }
 }

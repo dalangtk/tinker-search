@@ -162,27 +162,6 @@ pub struct AppConfig {
     pub boost: Vec<BoostRule>,
     pub integration: IntegrationCfg,
     pub plugins: PluginsCfg,
-    pub semantic: SemanticCfg,
-}
-
-/// 内置语义模型（bge-small-zh-v1.5）的开关。
-///
-/// 默认关闭：模型加载后常驻约 49 MB，用不上的用户不该为它买单。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SemanticCfg {
-    /// 搜索结果是否用语义分重排
-    pub enabled: bool,
-    /// 语义分权重（0~1），其余权重给原排序
-    pub weight: f32,
-    /// 参与重排的候选条数上限
-    pub top: usize,
-}
-
-impl Default for SemanticCfg {
-    fn default() -> Self {
-        Self { enabled: false, weight: 0.45, top: 300 }
-    }
 }
 
 /// 插件相关配置。插件本身的安装状态存在 `data_dir/plugins`，这里只放全局开关。
@@ -234,7 +213,6 @@ impl Default for AppConfig {
             boost: Vec::new(),
             integration: IntegrationCfg::default(),
             plugins: PluginsCfg::default(),
-            semantic: SemanticCfg::default(),
         }
     }
 }

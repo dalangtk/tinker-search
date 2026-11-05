@@ -5,7 +5,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import Icon from "./Icon.vue";
 import { api } from "../api";
 import { formatSize, formatCount } from "../utils/format";
-import type { AppConfig, IndexStats, MarketEntry, PluginView, SemanticStatus } from "../types";
+import type { AppConfig, IndexStats, MarketEntry, PluginView } from "../types";
 
 const props = defineProps<{
   visible: boolean;
@@ -37,7 +37,6 @@ watch(
       void loadLastError();
       void loadPlugins();
       void loadMarket();
-      void loadSemantic();
       // 协议开关以注册表实际状态为准，不用配置值猜
       api
         .protocolRegistered()
@@ -56,37 +55,6 @@ watch(
 /* ------------------------------ 插件管理 ------------------------------ */
 
 const plugins = ref<PluginView[]>([]);
-/** 内置语义模型状态：只有点开语义页或开启重排时才真正加载 */
-const semStatus = ref<SemanticStatus | null>(null);
-const semBusy = ref(false);
-
-async function loadSemantic() {
-  try {
-    semStatus.value = await api.semanticStatus();
-  } catch (e) {
-    semStatus.value = null;
-  }
-}
-
-/** 预热：把模型读进内存，顺便拿到真实加载耗时 */
-async function warmSemantic() {
-  semBusy.value = true;
-  try {
-    semStatus.value = await api.semanticWarm();
-    ElMessage.success(`模型已加载（${semStatus.value.load_ms} ms）`);
-  } catch (e) {
-    ElMessage.error(String(e));
-  } finally {
-    semBusy.value = false;
-  }
-}
-
-/** 开启重排时自动预热，避免第一次搜索卡一下 */
-async function onSemanticToggle() {
-  if (draft.semantic.enabled && !semStatus.value?.loaded) {
-    await warmSemantic();
-  }
-}
 const market = ref<MarketEntry[]>([]);
 const marketQ = ref("");
 const marketUrl = ref("");
@@ -358,7 +326,6 @@ const TABS = [
   { key: "index", label: "索引管理", icon: "database" },
   { key: "appearance", label: "外观与窗口", icon: "eye" },
   { key: "plugins", label: "插件", icon: "grid" },
-  { key: "semantic", label: "语义引擎", icon: "layers" },
   { key: "about", label: "关于", icon: "info" },
 ];
 
@@ -970,102 +937,6 @@ function openPath(kind: string) {
             </div>
 
             <!-- ============ 关于 ============ -->
-            <div v-show="tab === 'semantic'" class="pane">
-              <div class="group">
-                <div class="gh">内置语义模型 · bge-small-zh-v1.5</div>
-                <div class="row">
-                  <label class="chk">
-                    <input
-                      type="checkbox"
-                      v-model="draft.semantic.enabled"
-                      @change="onSemanticToggle"
-                    />
-                    <span>搜索时按语义相关度重排结果</span>
-                  </label>
-                </div>
-                <div class="d note">
-                  解决的是「字面不重合」：搜「预算」时把「2026年度预算表.xlsx」提到前面。
-                  它<strong>不解析</strong>时间和后缀——「今天下载的 pdf」仍由规则引擎处理，
-                  模型只在已有结果里调整顺序，认不准也不会让搜索变差。
-                </div>
-                <div class="kv">
-                  <span class="k">模型体积</span>
-                  <span class="v">{{ semStatus ? semStatus.size_mb + " MB" : "—" }}</span>
-                </div>
-                <div class="kv">
-                  <span class="k">向量维度</span>
-                  <span class="v">{{ semStatus?.dim || 512 }}</span>
-                </div>
-                <div class="kv">
-                  <span class="k">加载状态</span>
-                  <span class="v" :class="{ err: !!semStatus?.error }">
-                    {{
-                      semStatus?.loaded
-                        ? `已加载（${semStatus.load_ms} ms）`
-                        : semStatus?.present
-                          ? "未加载 · 按需加载"
-                          : "模型文件缺失"
-                    }}
-                  </span>
-                </div>
-                <div class="kv">
-                  <span class="k">模型来源</span>
-                  <span class="v">
-                    {{ semStatus?.custom ? "用户自备（已覆盖内置）" : "随应用内置" }}
-                  </span>
-                </div>
-                <div class="kv">
-                  <span class="k">模型目录</span>
-                  <span class="v mono ellipsis" :title="semStatus?.dir || ''">
-                    {{ semStatus?.dir || "—" }}
-                  </span>
-                </div>
-                <div class="kv">
-                  <span class="k">常驻内存</span>
-                  <span class="v">约 49 MB（仅在启用后占用）</span>
-                </div>
-                <div v-if="semStatus?.error" class="d note">
-                  加载失败：{{ semStatus.error }}
-                </div>
-              </div>
-
-              <div class="group">
-                <div class="gh">重排参数</div>
-                <div class="row">
-                  <div class="t">语义权重</div>
-                  <input
-                    type="range"
-                    min="0"
-                    max="0.8"
-                    step="0.05"
-                    v-model.number="draft.semantic.weight"
-                  />
-                  <span class="v">{{ Number(draft.semantic.weight).toFixed(2) }}</span>
-                </div>
-                <div class="row">
-                  <div class="t">候选条数</div>
-                  <input
-                    type="number"
-                    class="inp"
-                    min="20"
-                    max="2000"
-                    step="20"
-                    v-model.number="draft.semantic.top"
-                  />
-                </div>
-                <div class="d note">
-                  权重越高越信语义，越低越保留原排序；候选条数决定重排范围，
-                  300 条约 0.2 秒、1000 条约 0.6 秒，建议 200~400。
-                </div>
-              </div>
-
-              <div class="btnrow">
-                <button class="ghost" :disabled="semBusy" @click="warmSemantic">
-                  {{ semBusy ? "加载中…" : "立即加载模型" }}
-                </button>
-              </div>
-            </div>
-
             <div v-show="tab === 'about'" class="pane">
               <div class="about">
                 <div class="alogo">搜</div>
@@ -1077,7 +948,7 @@ function openPath(kind: string) {
               </div>
 
               <div class="group">
-                <div class="kv"><span class="k">应用版本</span><span class="v num">1.0.0</span></div>
+                <div class="kv"><span class="k">应用版本</span><span class="v num">1.0.1</span></div>
                 <div class="kv">
                   <span class="k">搜索引擎</span>
                   <span class="v">内置内核（sscore，Rust 原生 + USN 实时同步）</span>

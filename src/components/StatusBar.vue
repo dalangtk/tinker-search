@@ -18,8 +18,6 @@ const props = defineProps<{
   preview: boolean;
   /** SQL 模式：用「N 行 / N 个分组」代替「N 个项目」，避免和聚合结果对不上 */
   sqlText?: string;
-  /** 语义重排耗时；0 或未启用时不显示 */
-  rerankMs?: number;
   /** Ctrl 多选中的数量，大于 1 时提示 */
   pickedCount?: number;
 }>();
@@ -69,9 +67,6 @@ function pick(f: string) {
       <span class="unit">个项目</span>
       <span v-if="props.elapsed >= 0 && props.count > 0" class="elapsed num">
         {{ elapsedText }}
-      </span>
-      <span v-if="props.rerankMs" class="sem num" title="已按语义相关度重排">
-        语义 {{ props.rerankMs }} ms
       </span>
       <span v-if="(props.pickedCount || 0) > 1" class="picked num">
         已选 {{ props.pickedCount }} 项
@@ -204,14 +199,6 @@ function pick(f: string) {
   padding-left: 6px;
   border-left: 1px solid var(--border);
   margin-left: 2px;
-}
-.sem {
-  color: var(--accent);
-  background: var(--accent-soft);
-  border-radius: 999px;
-  padding: 1px 7px;
-  margin-left: 6px;
-  font-size: 11px;
 }
 .picked {
   color: var(--accent);

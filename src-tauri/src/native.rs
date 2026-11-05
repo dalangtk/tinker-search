@@ -950,52 +950,6 @@ pub fn rows(start: i32, count: i32) -> Result<Vec<Row>, String> {
     Ok(out)
 }
 
-/// 取当前视图前 `n` 条的文件名，供语义重排使用。
-///
-/// 不过滤墓碑：返回顺序必须与 `view[..n]` 严格一一对应，否则重排时对不上号。
-pub fn top_names(n: usize) -> Vec<(u32, String)> {
-    let Ok(st) = state() else {
-        return Vec::new();
-    };
-    let c = st.core.read();
-    let take = n.min(c.view.len());
-    c.view[..take]
-        .iter()
-        .map(|&id| {
-            let name = if (id as usize) < c.idx.len() {
-                c.idx.name(id).to_string()
-            } else {
-                String::new()
-            };
-            (id, name)
-        })
-        .collect()
-}
-
-/// 用新的顺序替换视图前段，返回实际调整的条数。
-///
-/// `order` 必须是原 `view[..n]` 的一个排列——否则宁可不动，
-/// 因为错位会让用户看到重复行或丢行。
-pub fn apply_rerank(order: &[u32]) -> usize {
-    let Ok(st) = state() else {
-        return 0;
-    };
-    let mut c = st.core.write();
-    let n = order.len().min(c.view.len());
-    if n == 0 {
-        return 0;
-    }
-    let mut want: Vec<u32> = c.view[..n].to_vec();
-    let mut got: Vec<u32> = order[..n].to_vec();
-    want.sort_unstable();
-    got.sort_unstable();
-    if want != got {
-        return 0;
-    }
-    c.view[..n].copy_from_slice(&order[..n]);
-    n
-}
-
 pub fn row_by_id(id: i32) -> Result<Row, String> {
     let n = state()?;
     let c = n.core.read();
@@ -1537,6 +1491,50 @@ mod nl_search_tests {
         };
         let (count, _) = nl_run(&mut c, &q, None, &[], &[]).unwrap();
         assert_eq!(count, 1, "关键词应当把范围收到一个文件");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 端到端：一句「上个月改过的pdf」→ 解析 → 真的落盘按时间筛。
+    /// 只测解析不够，过滤链路（stat + 字段 + 半开区间）也要一起过。
+    #[test]
+    fn nl_parse_last_month_then_filter() {
+        use chrono::{Datelike, Months};
+
+        let cfg: crate::nlu::NluCfg = {
+            let v: serde_json::Value =
+                serde_json::from_str(include_str!("../assets/plugins/tinker.nl-zh.json")).unwrap();
+            serde_json::from_value(v["nlu"].clone()).unwrap()
+        };
+
+        let root = std::env::temp_dir().join(format!("tinker-nl-e2e-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        touch(&root.join("上个月.pdf"), 0);
+        touch(&root.join("今天.pdf"), 0);
+        touch(&root.join("上个月.docx"), 0);
+
+        // 把「上个月.pdf」的修改时间挪到上个月中旬（ctime 改不了，所以测 mtime）
+        let first = chrono::Local::now().with_day(1).unwrap();
+        let mid = first - Months::new(1) + chrono::Duration::days(10);
+        let st = std::time::UNIX_EPOCH + Duration::from_millis(mid.timestamp_millis() as u64);
+        fs::File::options()
+            .write(true)
+            .open(root.join("上个月.pdf"))
+            .unwrap()
+            .set_modified(st)
+            .unwrap();
+
+        let label = root.to_string_lossy().to_string();
+        let (recs, _) = sscore::walk::walk(&root, &label, 8).unwrap();
+        let mut c = core_with(sscore::assemble(&label, &recs));
+
+        let q = crate::nlu::parse("上个月改过的pdf", &cfg, chrono::Local::now());
+        assert_eq!(q.field, "mtime");
+        assert_eq!(q.exts, vec!["pdf"]);
+        let (count, scanned) = nl_run(&mut c, &q, None, &[], &[]).unwrap();
+        assert_eq!(scanned, 2, "候选是两个 pdf");
+        assert_eq!(count, 1, "只有挪到上个月的那个 pdf 该留下");
 
         let _ = fs::remove_dir_all(&root);
     }

@@ -456,20 +456,6 @@ export async function mockInvoke(cmd: string, args: any = {}): Promise<any> {
       ];
     case "plugin_market_url":
       return "";
-    case "semantic_status":
-    case "semantic_warm":
-      return {
-        present: true,
-        loaded: true,
-        dim: 512,
-        size_mb: 22.9,
-        load_ms: 58,
-        dir: "（预览模式无实际模型）",
-        custom: false,
-        error: "",
-      };
-    case "semantic_rerank":
-      return { rows: [], moved: 0, elapsed_ms: 0, scores: [] };
     default:
       return null;
   }
