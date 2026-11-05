@@ -1,0 +1,284 @@
+/* ============================================================
+   设计系统：颜色标记 / 主题皮肤 / 基础排版
+   ============================================================ */
+
+:root {
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 14px;
+
+  --font: "Segoe UI Variable Text", -apple-system, "Segoe UI", "Microsoft YaHei UI",
+    "PingFang SC", system-ui, sans-serif;
+  --font-mono: "Cascadia Code", "JetBrains Mono", Consolas, "Courier New", monospace;
+
+  --row-h: 38px;
+  --title-h: 36px;
+
+  /* default（浅色 · 靛蓝） */
+  --bg: #f6f7f9;
+  --bg-grad: radial-gradient(1200px 500px at 12% -10%, #ececff 0%, transparent 60%),
+    radial-gradient(900px 400px at 100% 0%, #eaf6ff 0%, transparent 55%);
+  --panel: #ffffff;
+  --panel-2: #fafafc;
+  --panel-3: #f2f3f6;
+  --border: #e6e7ee;
+  --border-strong: #d8dae3;
+  --text: #16181d;
+  --text-2: #5e636e;
+  --text-3: #949aa5;
+  --accent: #5a5bd6;
+  --accent-2: #7b7cf0;
+  --accent-soft: rgba(90, 91, 214, 0.1);
+  --accent-soft-2: rgba(90, 91, 214, 0.16);
+  --hover: rgba(20, 22, 40, 0.045);
+  --hover-strong: rgba(20, 22, 40, 0.08);
+  --selected: rgba(90, 91, 214, 0.11);
+  --shadow-sm: 0 1px 2px rgba(20, 22, 40, 0.05);
+  --shadow: 0 10px 26px rgba(24, 26, 48, 0.08), 0 1px 3px rgba(24, 26, 48, 0.05);
+  --shadow-lg: 0 24px 60px rgba(20, 22, 44, 0.18);
+  --mark-bg: rgba(255, 196, 0, 0.35);
+  --mark-text: inherit;
+  --danger: #e5484d;
+  --ok: #2fa36b;
+}
+
+html[data-theme="dark"] {
+  --bg: #131418;
+  --bg-grad: radial-gradient(1200px 500px at 10% -10%, #232544 0%, transparent 60%),
+    radial-gradient(900px 400px at 100% 0%, #172b3a 0%, transparent 55%);
+  --panel: #1b1c22;
+  --panel-2: #202128;
+  --panel-3: #262832;
+  --border: #2b2d36;
+  --border-strong: #3a3d49;
+  --text: #e9eaef;
+  --text-2: #a3a8b4;
+  --text-3: #757b88;
+  --accent: #8b8cf5;
+  --accent-2: #a5a6ff;
+  --accent-soft: rgba(139, 140, 245, 0.14);
+  --accent-soft-2: rgba(139, 140, 245, 0.22);
+  --hover: rgba(255, 255, 255, 0.05);
+  --hover-strong: rgba(255, 255, 255, 0.09);
+  --selected: rgba(139, 140, 245, 0.16);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow: 0 12px 30px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 30px 70px rgba(0, 0, 0, 0.6);
+  --mark-bg: rgba(255, 196, 0, 0.28);
+  --danger: #ff6369;
+  --ok: #46c98b;
+}
+
+/* 樱花 */
+html[data-theme="sakura"] {
+  --bg: #fdf6f8;
+  --bg-grad: radial-gradient(1100px 480px at 8% -10%, #ffe6ef 0%, transparent 60%),
+    radial-gradient(900px 420px at 100% 0%, #f3ecff 0%, transparent 55%);
+  --panel: #fffafc;
+  --panel-2: #fff5f9;
+  --panel-3: #fbeef3;
+  --border: #f2dfe7;
+  --border-strong: #e8ccd8;
+  --text: #2a1b22;
+  --text-2: #775a67;
+  --text-3: #a98a98;
+  --accent: #d6558b;
+  --accent-2: #ee79a9;
+  --accent-soft: rgba(214, 85, 139, 0.1);
+  --accent-soft-2: rgba(214, 85, 139, 0.18);
+  --hover: rgba(90, 20, 50, 0.04);
+  --hover-strong: rgba(90, 20, 50, 0.08);
+  --selected: rgba(214, 85, 139, 0.12);
+}
+
+/* 薄荷 */
+html[data-theme="mint"] {
+  --bg: #f2faf6;
+  --bg-grad: radial-gradient(1100px 480px at 6% -10%, #dcf7e9 0%, transparent 60%),
+    radial-gradient(900px 420px at 100% 0%, #e4f4ff 0%, transparent 55%);
+  --panel: #ffffff;
+  --panel-2: #f6fdf9;
+  --panel-3: #eef8f3;
+  --border: #dcefe5;
+  --border-strong: #c7e5d6;
+  --text: #13221b;
+  --text-2: #4e6a5c;
+  --text-3: #86a294;
+  --accent: #17936a;
+  --accent-2: #2bb584;
+  --accent-soft: rgba(23, 147, 106, 0.1);
+  --accent-soft-2: rgba(23, 147, 106, 0.18);
+  --hover: rgba(10, 60, 40, 0.04);
+  --hover-strong: rgba(10, 60, 40, 0.08);
+  --selected: rgba(23, 147, 106, 0.12);
+}
+
+/* 赛博 */
+html[data-theme="cyber"] {
+  --bg: #0b0d16;
+  --bg-grad: radial-gradient(1000px 460px at 5% -10%, #1b2f6b 0%, transparent 60%),
+    radial-gradient(900px 420px at 100% 0%, #5a1350 0%, transparent 55%);
+  --panel: #11141f;
+  --panel-2: #151928;
+  --panel-3: #1c2233;
+  --border: #232a3d;
+  --border-strong: #33405c;
+  --text: #e6f0ff;
+  --text-2: #9db0cc;
+  --text-3: #6b7c99;
+  --accent: #26d0ff;
+  --accent-2: #6ae4ff;
+  --accent-soft: rgba(38, 208, 255, 0.13);
+  --accent-soft-2: rgba(38, 208, 255, 0.22);
+  --hover: rgba(38, 208, 255, 0.07);
+  --hover-strong: rgba(38, 208, 255, 0.12);
+  --selected: rgba(38, 208, 255, 0.16);
+  --shadow: 0 12px 30px rgba(0, 0, 0, 0.55);
+  --mark-bg: rgba(38, 208, 255, 0.22);
+}
+
+/* 玻璃 */
+html[data-theme="glass"] {
+  --bg: #eef1f7;
+  --bg-grad: radial-gradient(1200px 520px at 10% -10%, #dfe6ff 0%, transparent 60%),
+    radial-gradient(900px 440px at 100% 0%, #d8f0ff 0%, transparent 55%);
+  --panel: rgba(255, 255, 255, 0.72);
+  --panel-2: rgba(255, 255, 255, 0.55);
+  --panel-3: rgba(255, 255, 255, 0.4);
+  --border: rgba(255, 255, 255, 0.85);
+  --border-strong: rgba(180, 190, 220, 0.6);
+  --text: #1a1e2a;
+  --text-2: #5c6478;
+  --text-3: #8e97ab;
+  --accent: #4d6bfe;
+  --accent-2: #6f88ff;
+  --accent-soft: rgba(77, 107, 254, 0.1);
+  --accent-soft-2: rgba(77, 107, 254, 0.18);
+  --hover: rgba(30, 40, 80, 0.05);
+  --hover-strong: rgba(30, 40, 80, 0.09);
+  --selected: rgba(77, 107, 254, 0.12);
+  --shadow: 0 16px 40px rgba(30, 40, 80, 0.12);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font);
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  user-select: none;
+  cursor: default;
+}
+
+::selection {
+  background: var(--accent-soft-2);
+}
+
+/* 细滚动条 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 10px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-3);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+button {
+  font-family: inherit;
+  color: inherit;
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+input {
+  font-family: inherit;
+  color: inherit;
+}
+
+mark {
+  background: var(--mark-bg);
+  color: var(--mark-text);
+  border-radius: 3px;
+  padding: 0 1px;
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 通用浮层卡片 */
+.pop-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  backdrop-filter: blur(18px);
+}
+
+.icon-btn {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--text-2);
+  transition: background 0.12s, color 0.12s;
+}
+.icon-btn:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.icon-btn.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.14s ease, transform 0.14s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
+/* Element Plus 变量对齐（让组件跟随皮肤） */
+:root {
+  --el-color-primary: var(--accent);
+  --el-text-color-primary: var(--text);
+  --el-text-color-regular: var(--text-2);
+  --el-border-color: var(--border);
+  --el-border-color-light: var(--border);
+  --el-fill-color-blank: var(--panel);
+  --el-bg-color: var(--panel);
+  --el-bg-color-overlay: var(--panel);
+  --el-font-size-base: 13px;
+  --el-border-radius-base: 8px;
+}

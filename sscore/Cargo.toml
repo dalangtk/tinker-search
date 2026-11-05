@@ -1,0 +1,25 @@
+[workspace]
+
+[package]
+name = "sscore"
+version = "0.1.0"
+edition = "2021"
+description = "tinker搜索 索引内核：MFT 枚举 + 列式存储 + 并行子串匹配"
+
+[lib]
+name = "sscore"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sscore"
+path = "src/bin/sscore.rs"
+
+[dependencies]
+rayon = "1.12"
+memchr = "2.8"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
