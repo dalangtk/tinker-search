@@ -161,6 +161,21 @@ pub struct AppConfig {
     pub custom_modes: Vec<CustomMode>,
     pub boost: Vec<BoostRule>,
     pub integration: IntegrationCfg,
+    pub plugins: PluginsCfg,
+}
+
+/// 插件相关配置。插件本身的安装状态存在 `data_dir/plugins`，这里只放全局开关。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PluginsCfg {
+    /// 远程插件市场索引地址（空 = 只用随应用携带的内置市场）
+    pub market_url: String,
+}
+
+impl Default for PluginsCfg {
+    fn default() -> Self {
+        Self { market_url: String::new() }
+    }
 }
 
 /// 与系统集成相关的开关
@@ -197,6 +212,7 @@ impl Default for AppConfig {
             custom_modes: Vec::new(),
             boost: Vec::new(),
             integration: IntegrationCfg::default(),
+            plugins: PluginsCfg::default(),
         }
     }
 }

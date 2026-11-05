@@ -4,8 +4,12 @@ import type {
   AppConfig,
   HomeSnapshot,
   IndexStats,
+  MarketEntry,
   MatchSettings,
+  NlQuery,
+  NlStatus,
   Place,
+  PluginView,
   Row,
   SearchStart,
 } from "./types";
@@ -128,4 +132,29 @@ export const api = {
   takePendingUrl: () => call<string | null>("take_pending_url"),
   protocolRegistered: () => call<boolean>("url_protocol_registered"),
   hotkeyHookOk: () => call<boolean>("hotkey_hook_ok"),
+
+  // ---- 自然语言搜索（需要插件）----
+  nlStatus: () => call<NlStatus>("nl_status"),
+  nlParse: (text: string) => call<NlQuery>("nl_parse", { text }),
+  nlSearch: (text: string, scope?: string | null, places?: string[], drives?: string[]) =>
+    call<{ fingerprint: number; count: number; scanned: number; nl: NlQuery }>("nl_search", {
+      text,
+      scope: scope ?? null,
+      places: places ?? [],
+      drives: drives ?? [],
+    }),
+
+  // ---- 插件管理 ----
+  plugins: () => call<PluginView[]>("plugins_list"),
+  pluginMarket: (refresh = false) => call<MarketEntry[]>("plugin_market", { refresh }),
+  pluginInstall: (id: string) => call<PluginView>("plugin_install", { id }),
+  pluginInstallUrl: (url: string) => call<PluginView>("plugin_install_url", { url }),
+  pluginUpdate: (id: string) => call<PluginView>("plugin_update", { id }),
+  pluginSetEnabled: (id: string, enabled: boolean) =>
+    call<void>("plugin_set_enabled", { id, enabled }),
+  pluginUninstall: (id: string) => call<void>("plugin_uninstall", { id }),
+  pluginSetEngine: (id: string, provider: string, model: string, endpoint: string) =>
+    call<void>("plugin_set_engine", { id, provider, model, endpoint }),
+  pluginMarketUrl: () => call<string>("plugin_market_url"),
+  setPluginMarketUrl: (url: string) => call<void>("set_plugin_market_url", { url }),
 };

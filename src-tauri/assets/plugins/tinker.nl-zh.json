@@ -1,0 +1,65 @@
+{
+  "id": "tinker.nl-zh",
+  "name": "自然语言搜索（中文）",
+  "version": "1.0.0",
+  "type": "nlu",
+  "description": "把「今天下载的 pdf 文件」「上个月改过的 word」这类描述翻译成搜索条件：时间范围 + 文件类型 + 关键词。纯词表驱动，不含可执行代码。",
+  "author": "tinker",
+  "homepage": "https://gitee.com/shabigou/tinkersearch",
+  "min_app": "1.0.0",
+  "engine": {
+    "provider": "rules",
+    "model": "内置规则引擎",
+    "endpoint": ""
+  },
+  "nlu": {
+    "locale": "zh-CN",
+    "default_time_field": "ctime",
+    "ignore": [
+      "帮我", "帮忙", "找出", "查找", "搜索", "搜一下", "找一下", "找找", "找", "搜", "给我",
+      "显示", "列出", "看看", "一下", "所有", "全部", "那些", "这些", "文件", "文件夹里",
+      "里面", "其中", "我的", "电脑上", "电脑里", "这台", "上", "里", "在", "的", "了",
+      "和", "与", "或", "个", "些", "请", "想", "要", "需要", "文件列表",
+      "find", "search", "show", "list", "all", "file", "files", "me", "my",
+      "the", "in", "on", "of", "please", "documents", "folder"
+    ],
+    "fields": [
+      { "words": ["下载", "保存", "创建", "新建", "生成", "存到", "存入"], "field": "ctime" },
+      { "words": ["修改", "编辑", "改过", "改动", "更新", "改动过", "修订"], "field": "mtime" },
+      { "words": ["打开过", "访问", "看过", "浏览过", "用过"], "field": "atime" }
+    ],
+    "times": [
+      { "words": ["今天", "今日", "当天", "本日"], "range": "today" },
+      { "words": ["昨天", "昨日"], "range": "yesterday" },
+      { "words": ["前天"], "range": "days:-2" },
+      { "words": ["大前天"], "range": "days:-3" },
+      { "words": ["本周", "这周", "这个星期", "本星期", "这礼拜", "本礼拜"], "range": "this_week" },
+      { "words": ["上周", "上星期", "上个星期", "上礼拜"], "range": "last_week" },
+      { "words": ["本月", "这个月", "当月", "这月"], "range": "this_month" },
+      { "words": ["上个月", "上月", "上一个月"], "range": "last_month" },
+      { "words": ["今年", "本年", "这一年"], "range": "this_year" },
+      { "words": ["去年", "上年", "上一年"], "range": "last_year" },
+      { "words": ["刚刚", "刚才", "方才"], "range": "recent:1h" }
+    ],
+    "types": [
+      { "words": ["pdf"], "exts": ["pdf"] },
+      { "words": ["word", "doc"], "exts": ["doc", "docx", "docm", "rtf"] },
+      { "words": ["excel", "表格", "电子表格", "xls"], "exts": ["xls", "xlsx", "xlsm", "csv"] },
+      { "words": ["ppt", "幻灯片", "演示文稿", "演示"], "exts": ["ppt", "pptx", "pps", "ppsx"] },
+      { "words": ["图片", "照片", "图像", "截图", "壁纸"], "exts": ["jpg", "jpeg", "png", "gif", "bmp", "webp", "heic", "svg", "ico", "tif", "tiff"] },
+      { "words": ["视频", "影片", "电影", "录像", "录屏"], "exts": ["mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "ts", "rmvb"] },
+      { "words": ["音频", "音乐", "歌曲", "录音", "声音"], "exts": ["mp3", "wav", "flac", "aac", "m4a", "ogg", "wma", "ape"] },
+      { "words": ["压缩包", "压缩文件", "归档", "压缩"], "exts": ["zip", "rar", "7z", "tar", "gz", "bz2", "xz"] },
+      { "words": ["代码", "源码", "脚本"], "exts": ["rs", "js", "ts", "tsx", "jsx", "py", "java", "c", "cpp", "h", "hpp", "go", "cs", "php", "rb", "sh", "html", "css", "json", "yaml", "yml", "sql", "vue"] },
+      { "words": ["文本", "纯文本", "txt"], "exts": ["txt", "log", "ini", "cfg", "conf", "md"] },
+      { "words": ["安装包"], "exts": ["exe", "msi", "msix", "appx"] },
+      { "words": ["可执行文件", "程序", "应用"], "exts": ["exe", "msi", "bat", "cmd", "com"] },
+      { "words": ["电子书"], "exts": ["epub", "mobi", "azw3", "pdf", "djvu"] },
+      { "words": ["字幕"], "exts": ["srt", "ass", "vtt", "ssa"] },
+      { "words": ["字体"], "exts": ["ttf", "otf", "woff", "woff2", "ttc"] },
+      { "words": ["设计稿", "源文件"], "exts": ["psd", "ai", "sketch", "fig", "xd", "cdr"] },
+      { "words": ["文档"], "exts": ["doc", "docx", "pdf", "txt", "xls", "xlsx", "ppt", "pptx", "md"] }
+    ],
+    "folders": ["文件夹", "目录", "分区", "folder", "directory"]
+  }
+}

@@ -16,6 +16,7 @@ import HomeView from "./components/HomeView.vue";
 import { api, IS_MOCK, onEvent } from "./api";
 import {
   MODES,
+  NL_MODE,
   type AppConfig,
   type FacetTag,
   type Facets,
@@ -23,6 +24,7 @@ import {
   type HomeSnapshot,
   type IndexStats,
   type ModeDef,
+  type NlQuery,
   type Row,
 } from "./types";
 import {
@@ -84,6 +86,52 @@ const chain = ref<ChainSeg[] | null>(null);
 /** 可用的皮肤名，来自 app.css 里的 html[data-theme] */
 const SKINS = ["default", "dark", "sakura", "mint", "cyber", "glass"];
 
+/**
+ * 自然语言搜索由插件提供：没装或没启用时，模式列表里不出现这一项。
+ * 这也是「插件化」的实际意义——不想要的人一句都不会被这套词表影响。
+ */
+const nlReady = ref(false);
+const nlPluginName = ref("");
+const nlParsed = ref<NlQuery | null>(null);
+
+async function loadNlStatus() {
+  try {
+    const st = await api.nlStatus();
+    nlReady.value = !!st.ready;
+    nlPluginName.value = st.name || "";
+    if (!nlReady.value && modeKey.value === NL_MODE.key) {
+      modeKey.value = MODES[0].key;
+    }
+  } catch {
+    nlReady.value = false;
+  }
+}
+
+/** 输入时实时显示「已理解为…」，不用等提交 */
+let nlTimer: ReturnType<typeof setTimeout> | null = null;
+watch([keyword, modeKey], ([text, key]) => {
+  const isNl = key === NL_MODE.key && nlReady.value;
+  if (nlTimer) clearTimeout(nlTimer);
+  if (!isNl) {
+    nlParsed.value = null;
+    return;
+  }
+  if (!text.trim()) {
+    nlParsed.value = null;
+    return;
+  }
+  nlTimer = setTimeout(() => {
+    api.nlParse(text).then(
+      (q) => {
+        if (modeKey.value === NL_MODE.key) nlParsed.value = q;
+      },
+      () => {
+        /* 插件被停用时静默失败，loadNlStatus 会收拾状态 */
+      }
+    );
+  }, 250);
+});
+
 const searchBar = ref<InstanceType<typeof SearchBar> | null>(null);
 
 const allModes = computed<ModeDef[]>(() => {
@@ -94,7 +142,7 @@ const allModes = computed<ModeDef[]>(() => {
     hint: m.desc || m.template,
     custom: m,
   }));
-  return [...MODES, ...custom];
+  return [...MODES, ...(nlReady.value ? [NL_MODE] : []), ...custom];
 });
 
 function kindToType(kind: string): number {
@@ -332,6 +380,21 @@ async function runSearch(kw?: string) {
   searching.value = true;
   try {
     const useChain = !!chain.value?.length;
+
+    // 自然语言模式：翻译成 关键词 + 类型 + 时间区间 后再交给引擎
+    if (!useChain && mode.value.type === 3) {
+      const res = await api.nlSearch(
+        text,
+        scope.value,
+        facets.value.places,
+        facets.value.drives
+      );
+      if (my !== searchSeq) return;
+      fingerprint.value = res.fingerprint;
+      nlParsed.value = res.nl;
+      return;
+    }
+
     const payload = useChain ? JSON.stringify(chain.value) : kw ?? keyword.value;
     const res = await api.search(
       payload,
@@ -1400,6 +1463,7 @@ async function toggleMax() {
 
 onMounted(() => {
   void boot();
+  void loadNlStatus();
   window.addEventListener("keydown", onKeydown);
   window.addEventListener("mousedown", (e) => {
     if (ctx.value) {
@@ -1457,6 +1521,15 @@ defineExpose({ openSettings });
       @interact="interacted = true"
       @blur="kwFocused = false"
     />
+
+    <!-- 自然语言：把模型/引擎的理解结果摊开给用户看，避免「它到底搜了什么」的猜疑 -->
+    <div v-if="mode.type === 3 && nlParsed" class="nl-bar">
+      <span class="nl-lead">已理解为</span>
+      <span v-for="n in nlParsed.notes" :key="n" class="nl-chip">{{ n }}</span>
+      <span v-if="nlParsed.score < 0.45" class="nl-warn">
+        没识别出条件，试试「今天下载的 pdf」「上个月改过的 word」
+      </span>
+    </div>
 
     <!-- 历史 / 提示 -->
     <Transition name="fade">
@@ -1773,6 +1846,7 @@ defineExpose({ openSettings });
       @save="saveSettings"
       @theme="applyTheme"
       @refresh-stats="refreshStats"
+      @plugins-changed="loadNlStatus"
     />
   </div>
 </template>
@@ -1801,6 +1875,33 @@ defineExpose({ openSettings });
   background: color-mix(in srgb, var(--accent) 6%, transparent);
   font-size: 12px;
   color: var(--text-2);
+}
+
+/* 自然语言理解结果：一行小标签，告诉用户「这句话被译成了什么条件」 */
+.nl-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0 12px 8px;
+  padding: 5px 10px;
+  border-radius: var(--radius-md, 10px);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  font-size: 12px;
+  color: var(--text-2);
+}
+.nl-bar .nl-lead {
+  color: var(--text-3, var(--text-2));
+}
+.nl-bar .nl-chip {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--text-1);
+  white-space: nowrap;
+}
+.nl-bar .nl-warn {
+  color: var(--warn, #c98a1b);
 }
 .chain-bar .cl {
   font-weight: 600;

@@ -24,6 +24,8 @@ once_cell = "1"
 parking_lot = "0.12"
 rayon = "1.12"
 encoding_rs = "0.8"
+# 自然语言搜索的时间解析（本地时区、夏令时正确）
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # 原生索引内核（MFT 枚举 + 列式索引 + USN 实时同步）
 sscore = { path = "../sscore" }
 

@@ -3868,6 +3868,7 @@ dependencies = [
 name = "tinker-search"
 version = "1.0.0"
 dependencies = [
+ "chrono",
  "encoding_rs",
  "once_cell",
  "parking_lot",

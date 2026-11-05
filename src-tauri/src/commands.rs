@@ -2,7 +2,7 @@
 
 use crate::config::{match_json, AppConfig};
 use crate::model::{IndexStats, Row, SearchStart};
-use crate::{hotkey, native, shell, vfs};
+use crate::{hotkey, native, plugins, shell, vfs};
 use parking_lot::Mutex;
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -98,6 +98,142 @@ pub async fn search(
 #[tauri::command]
 pub fn cancel_search(fingerprint: i32) {
     native::cancel_search(fingerprint);
+}
+
+// ============================================================================
+// 自然语言搜索（由插件提供词表，宿主提供引擎）
+// ============================================================================
+
+/// 自然语言模式是否可用。没装插件或插件没启用时返回 `ready:false`，界面据此隐藏入口。
+#[tauri::command]
+pub fn nl_status(state: State<'_, AppState>) -> serde_json::Value {
+    match plugins::active_nlu(&state.data_dir) {
+        Some((m, e)) => serde_json::json!({
+            "ready": true,
+            "plugin": m.id,
+            "name": m.name,
+            "version": m.version,
+            "engine": e,
+        }),
+        None => serde_json::json!({ "ready": false }),
+    }
+}
+
+/// 只解析不搜索，用于输入时的实时提示（「已理解为：类型 pdf / 创建时间 今天」）。
+#[tauri::command]
+pub fn nl_parse(state: State<'_, AppState>, text: String) -> Result<serde_json::Value, String> {
+    let (m, e) = plugins::active_nlu(&state.data_dir).ok_or("未启用自然语言搜索插件")?;
+    let q = plugins::parse(&m, &e, &text);
+    serde_json::to_value(q).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn nl_search(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    text: String,
+    scope: Option<String>,
+    places: Option<Vec<String>>,
+    drives: Option<Vec<String>>,
+) -> Result<serde_json::Value, String> {
+    let (m, e) = plugins::active_nlu(&state.data_dir).ok_or("未启用自然语言搜索插件")?;
+    let q = plugins::parse(&m, &e, &text);
+    let places = places.unwrap_or_default();
+    let drives = drives.unwrap_or_default();
+    let app2 = app.clone();
+    blocking(move || {
+        let (start, count, scanned) = native::nl_search(&app2, &q, scope.as_deref(), &places, &drives)?;
+        Ok(serde_json::json!({
+            "fingerprint": start.fingerprint,
+            "accepted": start.accepted,
+            "count": count,
+            "scanned": scanned,
+            "nl": q,
+        }))
+    })
+    .await
+}
+
+// ============================================================================
+// 插件管理
+// ============================================================================
+
+#[tauri::command]
+pub fn plugins_list(state: State<'_, AppState>) -> Vec<plugins::PluginView> {
+    plugins::list_in(&state.data_dir, &state.get().plugins.market_url)
+}
+
+/// 插件市场索引。`refresh` 为 true 时忽略 10 分钟缓存重新拉取。
+#[tauri::command]
+pub async fn plugin_market(state: State<'_, AppState>, refresh: Option<bool>) -> Result<Vec<plugins::MarketEntry>, String> {
+    let url = state.get().plugins.market_url;
+    let dir = state.data_dir.clone();
+    // 强行刷新就先把缓存戳删掉
+    if refresh.unwrap_or(false) {
+        let _ = std::fs::remove_file(dir.join("market").join("index.json"));
+    }
+    blocking(move || Ok(plugins::market(&dir, &url))).await
+}
+
+#[tauri::command]
+pub fn plugin_install(state: State<'_, AppState>, id: String) -> Result<plugins::PluginView, String> {
+    let entry = plugins::market(&state.data_dir, &state.get().plugins.market_url)
+        .into_iter()
+        .find(|e| e.id == id)
+        .ok_or_else(|| "市场里没有这个插件".to_string())?;
+    if let Some(rest) = entry.download.strip_prefix("builtin:") {
+        plugins::install_bundled(&state.data_dir, rest)
+    } else {
+        plugins::install_url(&state.data_dir, &entry.download)
+    }
+}
+
+#[tauri::command]
+pub fn plugin_install_url(state: State<'_, AppState>, url: String) -> Result<plugins::PluginView, String> {
+    plugins::install_url(&state.data_dir, &url)
+}
+
+#[tauri::command]
+pub fn plugin_update(state: State<'_, AppState>, id: String) -> Result<plugins::PluginView, String> {
+    let url = state.get().plugins.market_url;
+    plugins::update(&state.data_dir, &id, &url)
+}
+
+#[tauri::command]
+pub fn plugin_set_enabled(state: State<'_, AppState>, id: String, enabled: bool) -> Result<(), String> {
+    plugins::set_enabled(&state.data_dir, &id, enabled)
+}
+
+#[tauri::command]
+pub fn plugin_uninstall(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    plugins::uninstall(&state.data_dir, &id)
+}
+
+/// 改插件的解析引擎：`rules` 用本地规则，`http` 转发到任意 OpenAI 兼容端点。
+#[tauri::command]
+pub fn plugin_set_engine(
+    state: State<'_, AppState>,
+    id: String,
+    provider: String,
+    model: String,
+    endpoint: String,
+) -> Result<(), String> {
+    plugins::set_engine(&state.data_dir, &id, plugins::EngineCfg { provider, model, endpoint })
+}
+
+#[tauri::command]
+pub fn plugin_market_url(state: State<'_, AppState>) -> String {
+    state.get().plugins.market_url
+}
+
+#[tauri::command]
+pub fn set_plugin_market_url(state: State<'_, AppState>, url: String) -> Result<(), String> {
+    let url = url.trim().to_string();
+    if !url.is_empty() && !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("市场地址必须以 http:// 或 https:// 开头".into());
+    }
+    state.update(|c| c.plugins.market_url = url);
+    Ok(())
 }
 
 #[tauri::command]

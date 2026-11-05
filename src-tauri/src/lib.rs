@@ -5,6 +5,9 @@ mod config;
 mod hotkey;
 mod model;
 mod native;
+mod nlu;
+mod nlu_model;
+mod plugins;
 mod shell;
 mod vfs;
 
@@ -333,6 +336,19 @@ pub fn run() {
             commands::engine_ready,
             commands::search,
             commands::cancel_search,
+            commands::nl_status,
+            commands::nl_parse,
+            commands::nl_search,
+            commands::plugins_list,
+            commands::plugin_market,
+            commands::plugin_install,
+            commands::plugin_install_url,
+            commands::plugin_update,
+            commands::plugin_set_enabled,
+            commands::plugin_uninstall,
+            commands::plugin_set_engine,
+            commands::plugin_market_url,
+            commands::set_plugin_market_url,
             commands::get_rows,
             commands::get_row,
             commands::get_icons,

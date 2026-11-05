@@ -5,7 +5,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import Icon from "./Icon.vue";
 import { api } from "../api";
 import { formatSize, formatCount } from "../utils/format";
-import type { AppConfig, IndexStats } from "../types";
+import type { AppConfig, IndexStats, MarketEntry, PluginView } from "../types";
 
 const props = defineProps<{
   visible: boolean;
@@ -21,6 +21,7 @@ const emit = defineEmits<{
   (e: "save", cfg: AppConfig): void;
   (e: "theme", name: string): void;
   (e: "refresh-stats"): void;
+  (e: "plugins-changed"): void;
 }>();
 
 const tab = ref("search");
@@ -34,6 +35,8 @@ watch(
       tab.value = props.initialTab || "search";
       void loadIndexStuff();
       void loadLastError();
+      void loadPlugins();
+      void loadMarket();
       // 协议开关以注册表实际状态为准，不用配置值猜
       api
         .protocolRegistered()
@@ -48,6 +51,150 @@ watch(
     }
   }
 );
+
+/* ------------------------------ 插件管理 ------------------------------ */
+
+const plugins = ref<PluginView[]>([]);
+const market = ref<MarketEntry[]>([]);
+const marketQ = ref("");
+const marketUrl = ref("");
+/** 正在操作的插件 id：按钮置灰，避免连点 */
+const pluginBusy = ref("");
+const engineDraft = ref<{
+  id: string;
+  name: string;
+  provider: string;
+  model: string;
+  endpoint: string;
+} | null>(null);
+
+async function loadPlugins() {
+  try {
+    plugins.value = await api.plugins();
+  } catch {
+    plugins.value = [];
+  }
+}
+
+async function loadMarket(refresh = false) {
+  try {
+    market.value = await api.pluginMarket(refresh);
+    marketUrl.value = await api.pluginMarketUrl();
+  } catch (e) {
+    ElMessage.error(String(e));
+  }
+}
+
+const marketFiltered = computed(() => {
+  const q = marketQ.value.trim().toLowerCase();
+  if (!q) return market.value;
+  return market.value.filter(
+    (e) =>
+      e.name.toLowerCase().includes(q) ||
+      e.description.toLowerCase().includes(q) ||
+      e.id.toLowerCase().includes(q)
+  );
+});
+
+const installedIds = computed(() => new Set(plugins.value.map((p) => p.id)));
+
+async function installPlugin(e: MarketEntry) {
+  pluginBusy.value = e.id;
+  try {
+    await api.pluginInstall(e.id);
+    ElMessage.success(`已安装「${e.name}」，打开开关就能用`);
+    await loadPlugins();
+    emit("plugins-changed");
+  } catch (err) {
+    ElMessage.error(String(err));
+  } finally {
+    pluginBusy.value = "";
+  }
+}
+
+async function togglePlugin(p: PluginView) {
+  pluginBusy.value = p.id;
+  try {
+    await api.pluginSetEnabled(p.id, !p.enabled);
+    await loadPlugins();
+    emit("plugins-changed");
+  } catch (err) {
+    ElMessage.error(String(err));
+  } finally {
+    pluginBusy.value = "";
+  }
+}
+
+async function updatePlugin(p: PluginView) {
+  pluginBusy.value = p.id;
+  try {
+    await api.pluginUpdate(p.id);
+    ElMessage.success(`已更新到 ${p.latest}`);
+    await loadPlugins();
+    emit("plugins-changed");
+  } catch (err) {
+    ElMessage.error(String(err));
+  } finally {
+    pluginBusy.value = "";
+  }
+}
+
+async function uninstallPlugin(p: PluginView) {
+  try {
+    await ElMessageBox.confirm(
+      `卸载「${p.name}」？它会立即失效，相关设置一并删除。`,
+      "卸载插件",
+      { type: "warning", confirmButtonText: "卸载", cancelButtonText: "取消" }
+    );
+  } catch {
+    return;
+  }
+  pluginBusy.value = p.id;
+  try {
+    await api.pluginUninstall(p.id);
+    ElMessage.success("已卸载");
+    await loadPlugins();
+    emit("plugins-changed");
+  } catch (err) {
+    ElMessage.error(String(err));
+  } finally {
+    pluginBusy.value = "";
+  }
+}
+
+function editEngine(p: PluginView) {
+  engineDraft.value = {
+    id: p.id,
+    name: p.name,
+    provider: p.engine.provider || "rules",
+    model: p.engine.model || "",
+    endpoint: p.engine.endpoint || "",
+  };
+}
+
+async function saveEngine() {
+  const d = engineDraft.value;
+  if (!d) return;
+  try {
+    await api.pluginSetEngine(d.id, d.provider, d.model, d.endpoint);
+    ElMessage.success("已切换解析引擎");
+    engineDraft.value = null;
+    await loadPlugins();
+    emit("plugins-changed");
+  } catch (err) {
+    ElMessage.error(String(err));
+  }
+}
+
+async function saveMarketUrl() {
+  try {
+    await api.setPluginMarketUrl(marketUrl.value);
+    ElMessage.success("市场地址已保存");
+    await loadMarket(true);
+  } catch (err) {
+    ElMessage.error(String(err));
+  }
+}
 
 const drives = ref<any[]>([]);
 const excluded = ref<string[]>([]);
@@ -178,6 +325,7 @@ const TABS = [
   { key: "search", label: "搜索匹配", icon: "search" },
   { key: "index", label: "索引管理", icon: "database" },
   { key: "appearance", label: "外观与窗口", icon: "eye" },
+  { key: "plugins", label: "插件", icon: "grid" },
   { key: "about", label: "关于", icon: "info" },
 ];
 
@@ -644,6 +792,151 @@ function openPath(kind: string) {
             </div>
 
             <!-- ============ 关于 ============ -->
+            <!-- ============ 插件 ============ -->
+            <div v-show="tab === 'plugins'" class="pane">
+              <div class="group">
+                <div class="gh">已安装 · {{ plugins.length }}</div>
+                <div v-if="!plugins.length" class="d note">
+                  还没有插件。「自然语言搜索」本身就是一个插件，去下面的插件市场装一个试试。
+                </div>
+                <div v-for="p in plugins" :key="p.id" class="plug">
+                  <div class="plug-main">
+                    <div class="plug-name">
+                      <span>{{ p.name }}</span>
+                      <span class="tag">v{{ p.version }}</span>
+                      <span v-if="p.has_update" class="tag warn">可更新 {{ p.latest }}</span>
+                      <span class="tag" :class="p.enabled ? 'on' : 'off'">
+                        {{ p.enabled ? "已启用" : "未启用" }}
+                      </span>
+                    </div>
+                    <div class="plug-desc">{{ p.description }}</div>
+                    <div class="plug-meta">
+                      引擎：{{
+                        p.engine.provider === "http"
+                          ? `外部模型 ${p.engine.model || "(未填模型名)"}`
+                          : "内置规则"
+                      }}
+                      · 词表 {{ p.vocab }} 条 · 来源 {{ p.source }}
+                    </div>
+                  </div>
+                  <div class="plug-acts">
+                    <button class="ghost" :disabled="pluginBusy === p.id" @click="togglePlugin(p)">
+                      {{ p.enabled ? "停用" : "启用" }}
+                    </button>
+                    <button
+                      v-if="p.has_update"
+                      class="ghost"
+                      :disabled="pluginBusy === p.id"
+                      @click="updatePlugin(p)"
+                    >
+                      更新
+                    </button>
+                    <button class="ghost" @click="editEngine(p)">引擎</button>
+                    <button
+                      class="ghost danger"
+                      :disabled="pluginBusy === p.id"
+                      @click="uninstallPlugin(p)"
+                    >
+                      卸载
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="group">
+                <div class="gh">
+                  <span>插件市场</span>
+                  <button class="link inline" @click="loadMarket(true)">刷新</button>
+                </div>
+                <div class="row">
+                  <input v-model="marketQ" class="inp" placeholder="搜索插件：自然语言、时间、拼音…" />
+                </div>
+                <div v-for="e in marketFiltered" :key="e.id" class="plug">
+                  <div class="plug-main">
+                    <div class="plug-name">
+                      <span>{{ e.name }}</span>
+                      <span class="tag">v{{ e.version }}</span>
+                      <span v-if="e.download.startsWith('builtin:')" class="tag">随应用内置</span>
+                    </div>
+                    <div class="plug-desc">{{ e.description }}</div>
+                    <div class="plug-meta">
+                      {{ e.author }} · {{ e.changelog }}
+                    </div>
+                  </div>
+                  <div class="plug-acts">
+                    <span v-if="installedIds.has(e.id)" class="tag on">已安装</span>
+                    <button
+                      v-else
+                      class="ghost"
+                      :disabled="pluginBusy === e.id"
+                      @click="installPlugin(e)"
+                    >
+                      安装
+                    </button>
+                  </div>
+                </div>
+                <div v-if="!marketFiltered.length" class="d note">没有匹配的插件。</div>
+              </div>
+
+              <div class="group">
+                <div class="gh">市场源</div>
+                <div class="row">
+                  <div>
+                    <div class="t">自定义市场地址</div>
+                    <div class="d">
+                      填你自己的发布服务（如 http://127.0.0.1:8787/index.json），留空则只用随应用携带的内置市场。
+                    </div>
+                  </div>
+                  <div class="hk-actions">
+                    <input v-model="marketUrl" class="inp" placeholder="http://127.0.0.1:8787/index.json" />
+                    <button class="ghost" @click="saveMarketUrl">保存</button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 引擎切换：换模型只改这里的配置，插件不用重装 -->
+              <div v-if="engineDraft" class="group">
+                <div class="gh">{{ engineDraft.name }} · 解析引擎</div>
+                <div class="row">
+                  <div>
+                    <div class="t">引擎类型</div>
+                    <div class="d">
+                      内置规则不下载任何模型，毫秒级出结果；外部模型适合说法很口语、词表覆盖不到的场景。
+                    </div>
+                  </div>
+                  <div class="hk-actions">
+                    <select v-model="engineDraft.provider" class="inp">
+                      <option value="rules">内置规则引擎</option>
+                      <option value="http">外部模型（OpenAI 兼容）</option>
+                    </select>
+                  </div>
+                </div>
+                <template v-if="engineDraft.provider === 'http'">
+                  <div class="row">
+                    <div class="t">端点</div>
+                    <input
+                      v-model="engineDraft.endpoint"
+                      class="inp wide"
+                      placeholder="http://127.0.0.1:11434/v1/chat/completions"
+                    />
+                  </div>
+                  <div class="row">
+                    <div class="t">模型名</div>
+                    <input v-model="engineDraft.model" class="inp wide" placeholder="qwen2.5:0.5b" />
+                  </div>
+                  <div class="d note">
+                    模型只负责「抽词」，日期换算仍在本地完成，所以换任何小模型都不会把「上个月」算错。
+                    调用失败会自动回落到内置规则。
+                  </div>
+                </template>
+                <div class="btnrow">
+                  <button class="primary" @click="saveEngine">保存</button>
+                  <button class="ghost" @click="engineDraft = null">取消</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- ============ 关于 ============ -->
             <div v-show="tab === 'about'" class="pane">
               <div class="about">
                 <div class="alogo">搜</div>
@@ -1019,6 +1312,95 @@ code {
 }
 .link.inline {
   margin-left: 8px;
+}
+
+/* ---------- 插件卡片 ---------- */
+.plug {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-2);
+  margin-bottom: 8px;
+}
+.plug-main {
+  min-width: 0;
+  flex: 1;
+}
+.plug-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+.plug-desc {
+  margin-top: 4px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-3);
+}
+.plug-meta {
+  margin-top: 5px;
+  font-size: 11px;
+  color: var(--text-3);
+  opacity: 0.85;
+}
+.plug-acts {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.tag {
+  display: inline-flex;
+  align-items: center;
+  height: 17px;
+  padding: 0 6px;
+  border-radius: 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  background: var(--panel-3);
+  color: var(--text-3);
+}
+.tag.on {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+}
+.tag.warn {
+  background: color-mix(in srgb, #e0a020 18%, transparent);
+  color: #b07d12;
+}
+.tag.off {
+  opacity: 0.7;
+}
+.ghost.danger:hover {
+  border-color: #e5484d;
+  color: #e5484d;
+}
+.inp {
+  height: 28px;
+  min-width: 180px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--text-1);
+  font-size: 12px;
+  outline: none;
+}
+.inp:focus {
+  border-color: var(--accent);
+}
+.inp.wide {
+  flex: 0 1 360px;
 }
 
 .exlist {

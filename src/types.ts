@@ -79,6 +79,67 @@ export interface AppConfig {
   custom_modes: CustomMode[];
   boost: { kind: string; value: string; delta: number }[];
   integration: { protocol: boolean };
+  plugins: { market_url: string };
+}
+
+/* ------------------------------ 自然语言搜索 ------------------------------ */
+
+/** 一句话解析出来的搜索条件，由插件词表 + 宿主引擎产出 */
+export interface NlQuery {
+  keyword: string;
+  exts: string[];
+  dirs_only: boolean;
+  /** ctime | mtime | atime */
+  field: string;
+  from_ms: number;
+  to_ms: number;
+  /** 时间区间的人话描述，如「今天」「最近 3 天」 */
+  label: string;
+  score: number;
+  /** 给人看的理解结果，界面上渲染成小标签 */
+  notes: string[];
+  leftover: string[];
+}
+
+export interface NlStatus {
+  ready: boolean;
+  plugin?: string;
+  name?: string;
+  version?: string;
+  engine?: { provider: string; model: string; endpoint: string };
+}
+
+/* -------------------------------- 插件 -------------------------------- */
+
+export interface PluginView {
+  id: string;
+  name: string;
+  version: string;
+  kind: string;
+  description: string;
+  author: string;
+  homepage: string;
+  enabled: boolean;
+  installed_at: number;
+  source: string;
+  engine: { provider: string; model: string; endpoint: string };
+  latest: string;
+  has_update: boolean;
+  /** 词表里收录的说法数量 */
+  vocab: number;
+}
+
+export interface MarketEntry {
+  id: string;
+  name: string;
+  version: string;
+  kind: string;
+  description: string;
+  author: string;
+  min_app: string;
+  download: string;
+  sha256: string;
+  changelog: string;
 }
 
 export interface IndexStats {
@@ -193,3 +254,12 @@ export const MODES: ModeDef[] = [
     phone: "Size > '100M'",
   },
 ];
+
+/** 自然语言模式不放进 MODES：它由插件提供，没装插件时不该出现在列表里 */
+export const NL_MODE: ModeDef = {
+  key: "natural",
+  label: "自然语言",
+  type: 3,
+  hint: "今天下载的 pdf、上个月改过的 word、最近三天的截图",
+  phone: "今天下载的 pdf 文件",
+};

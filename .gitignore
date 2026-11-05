@@ -56,3 +56,7 @@ desktop.ini
 *.bak
 *.orig
 *.rej
+
+# 插件市场服务运行时产物（index.json 与插件包由 publish.mjs 生成）
+market/public/
+market/server.log

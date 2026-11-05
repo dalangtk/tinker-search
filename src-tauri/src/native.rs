@@ -632,6 +632,156 @@ pub fn cancel_search(_fp: i32) {
     // 没有可取消的中间态；保留命令只为让前端逻辑无需分支。
 }
 
+/// 自然语言搜索：条件由 `nlu` 解析好再传进来，这里的活是「按条件取候选 + 用 stat 过滤时间」。
+///
+/// 时间/大小不在索引里（索引只存名字和父指针，这是 46 字节/条的前提），
+/// 所以这一步必须现场 `stat`。好在这里只对**已经由后缀 + 关键词收窄过的候选**取元数据，
+/// 而且 `c.meta` 跨查询保留，同一批文件第二次过滤基本不花时间。
+///
+/// 返回 `(SearchStart, 命中数, 过滤前候选数)`，前端用后两个数字显示「从 N 个里筛出 M 个」。
+pub fn nl_search(
+    app: &AppHandle,
+    q: &crate::nlu::NluQuery,
+    scope: Option<&str>,
+    places: &[String],
+    drives: &[String],
+) -> Result<(SearchStart, i32, i32), String> {
+    let n = state()?;
+    if !n.ready.load(Ordering::SeqCst) {
+        return Err("索引尚未就绪".into());
+    }
+    let t = Instant::now();
+
+    let (count, scanned, fp) = {
+        let mut c = n.core.write();
+        let (count, scanned) = nl_run(&mut c, q, scope, places, drives)?;
+        (count, scanned, c.fp)
+    };
+
+    emit(
+        app,
+        "tinker:search-complete",
+        serde_json::json!({
+            "fingerprint": fp,
+            "count": count,
+            "elapsedMs": t.elapsed().as_secs_f64() * 1000.0,
+            "searchType": 3,
+            "aggregate": false,
+            "empty": false,
+            "nl": q,
+            "scanned": scanned,
+        }),
+    );
+    Ok((SearchStart { fingerprint: fp, accepted: true }, count, scanned))
+}
+
+/// `nl_search` 的核心，拆出来是为了能脱离 Tauri 运行时做单元测试。
+/// 返回 `(命中数, 过滤前候选数)`。
+fn nl_run(
+    c: &mut Core,
+    q: &crate::nlu::NluQuery,
+    scope: Option<&str>,
+    places: &[String],
+    drives: &[String],
+) -> Result<(i32, i32), String> {
+    let mut unresolved: Vec<String> = Vec::new();
+
+    Ok({        // 自然语言自带类型条件，不再叠加侧栏筛选（否则用户说「pdf」却被侧栏的「图片」挡掉）
+        let mut filter = Filter::default();
+        for e in &q.exts {
+            filter.exts.push(e.as_bytes().to_vec());
+        }
+        filter.dirs_only = q.dirs_only;
+
+        for d in drives {
+            match vol_index(&c.idx, d) {
+                Some(v) => filter.vols.push(v),
+                None => filter.vols.push(NO_VOL),
+            }
+        }
+        let scopes: Vec<&str> = places
+            .iter()
+            .map(String::as_str)
+            .chain(scope.iter().copied())
+            .filter(|s| !s.trim().is_empty())
+            .collect();
+        for p in &scopes {
+            match resolve_place(&mut *c, p) {
+                Some(id) => filter.under.push(id),
+                None => unresolved.push((*p).to_string()),
+            }
+        }
+
+        let kw = q.keyword.trim();
+        let mut hits = if kw.is_empty() {
+            // 纯条件（「今天下载的 pdf」）就是一次带过滤的遍历
+            browse(&c.idx, &filter, 60_000)
+        } else {
+            let opts = QueryOpts {
+                limit: 200_000,
+                dirs: None,
+                search_path: kw.contains('\\') || kw.contains('/'),
+                filter: filter.clone(),
+            };
+            search_timed(&c.idx, kw, &opts).0
+        };
+
+        if !unresolved.is_empty() {
+            let prefixes: Vec<String> = unresolved
+                .iter()
+                .map(|p| p.trim_end_matches('\\').to_ascii_lowercase())
+                .collect();
+            hits.retain(|h| {
+                let path = c.idx.path_of(h.id).to_ascii_lowercase();
+                prefixes.iter().any(|p| path.starts_with(p))
+            });
+        }
+
+        let scanned = hits.len();
+
+        // 时间过滤：先并行补齐元数据，再按字段裁掉区间外的
+        if q.from_ms > 0 || q.to_ms > 0 {
+            if scanned > NL_STAT_LIMIT {
+                return Err(format!(
+                    "符合「{}」的文件有 {} 个，超过 {} 个就要逐个读文件时间，太慢。请加上更具体的词，比如文件类型、关键词或更短的时间范围。",
+                    q.label, scanned, NL_STAT_LIMIT
+                ));
+            }
+            let ids: Vec<u32> = hits.iter().map(|h| h.id).collect();
+            // 一次性重借 `c`，避免 `&c.idx` 与 `&mut c.meta` 各借一次守卫
+            let core = &mut *c;
+            fill_meta(&core.idx, &mut core.meta, &ids);
+            let meta = &core.meta;
+            let (from, to) = (q.from_ms, q.to_ms);
+            let field = q.field.as_str();
+            hits.retain(|h| {
+                let m = meta.get(&h.id).copied().unwrap_or_default();
+                let ts = match field {
+                    "mtime" => m.mtime,
+                    "atime" => m.atime,
+                    _ => m.ctime,
+                };
+                // stat 失败的时间是 0，直接判为不匹配，避免脏数据混进结果
+                ts > 0 && (from == 0 || ts >= from) && (to == 0 || ts < to)
+            });
+        }
+
+        c.fp += 1;
+        let count = hits.len();
+        c.keyword = q.keyword.clone();
+        c.scope = scope.map(|s| s.to_string());
+        c.hits = hits;
+        c.sql = None;
+        c.mode = 3;
+        apply_sort(c);
+        (count as i32, scanned as i32)
+    })
+}
+
+/// 时间过滤最多允许对这么多条候选做 stat。放在这里而不是引擎里，
+/// 是因为上限取决于磁盘：NVMe 上 10 万条约 0.4 秒，机械盘会慢一个量级。
+const NL_STAT_LIMIT: usize = 120_000;
+
 fn sql_search(app: &AppHandle, text: &str) -> Result<SearchStart, String> {
     let n = state()?;
     let t = Instant::now();
@@ -1257,5 +1407,92 @@ mod browse_order_tests {
         v.sort_by_cached_key(|&id| idx.name(id).to_lowercase());
         let names: Vec<&str> = v.iter().map(|&id| idx.name(id)).collect();
         assert_eq!(names, vec!["a.txt", "b.txt", "sub", "Zed.txt"]);
+    }
+}
+
+#[cfg(test)]
+mod nl_search_tests {
+    use super::*;
+    use crate::nlu::NluQuery;
+    use std::fs;
+    use std::io::Write;
+    use std::path::Path;
+    use std::time::SystemTime;
+
+    fn core_with(idx: Index) -> Core {
+        Core {
+            idx,
+            hits: Vec::new(),
+            view: Vec::new(),
+            fp: 0,
+            keyword: String::new(),
+            scope: None,
+            filter: Filter::default(),
+            places: HashMap::new(),
+            sql: None,
+            sort_field: "相关度".into(),
+            sort_asc: false,
+            meta: HashMap::new(),
+            mode: 0,
+        }
+    }
+
+    /// 建一个真实文件并把修改时间往前调，用于验证时间过滤
+    fn touch(p: &Path, days_ago: u64) {
+        let mut f = fs::File::create(p).unwrap();
+        f.write_all(b"x").unwrap();
+        let t = SystemTime::now() - Duration::from_secs(days_ago * 86_400);
+        f.set_modified(t).unwrap();
+    }
+
+    #[test]
+    fn nl_type_and_time_filter_end_to_end() {
+        let root = std::env::temp_dir().join(format!("tinker-nl-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("sub")).unwrap();
+        touch(&root.join("今天.pdf"), 0);
+        touch(&root.join("上个月.pdf"), 40);
+        touch(&root.join("今天.docx"), 0);
+        touch(&root.join("sub").join("深层.pdf"), 0);
+
+        // 根记录的名字就是磁盘路径，这样 path_of() 拼出来的才是真实路径，
+        // 后面按时间过滤时的 stat 才能命中文件
+        let label = root.to_string_lossy().to_string();
+        let (recs, _) = sscore::walk::walk(&root, &label, 8).unwrap();
+        let idx = sscore::assemble(&label, &recs);
+        let mut c = core_with(idx);
+
+        // 只按类型：pdf 有 3 个（含子目录里的）
+        let q = NluQuery { exts: vec!["pdf".into()], ..Default::default() };
+        let (count, _) = nl_run(&mut c, &q, None, &[], &[]).unwrap();
+        assert_eq!(count, 3, "pdf 应当有 3 个（含子目录）");
+
+        // 类型 + 最近一天修改：40 天前那个要被滤掉
+        let now = chrono::Utc::now().timestamp_millis();
+        let q = NluQuery {
+            exts: vec!["pdf".into()],
+            field: "mtime".into(),
+            from_ms: now - 86_400_000,
+            to_ms: now + 60_000,
+            label: "今天".into(),
+            ..Default::default()
+        };
+        let (count, scanned) = nl_run(&mut c, &q, None, &[], &[]).unwrap();
+        assert_eq!(scanned, 3, "过滤前候选是 3 个 pdf");
+        assert_eq!(count, 2, "40 天前的 pdf 应当被时间条件滤掉");
+
+        // 再加关键词：只剩「今天.pdf」
+        let q = NluQuery {
+            keyword: "今天".into(),
+            exts: vec!["pdf".into()],
+            field: "mtime".into(),
+            from_ms: now - 86_400_000,
+            to_ms: now + 60_000,
+            ..Default::default()
+        };
+        let (count, _) = nl_run(&mut c, &q, None, &[], &[]).unwrap();
+        assert_eq!(count, 1, "关键词应当把范围收到一个文件");
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

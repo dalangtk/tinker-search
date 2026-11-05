@@ -393,6 +393,69 @@ export async function mockInvoke(cmd: string, args: any = {}): Promise<any> {
       return MOCK_HOME;
     case "perf_text":
       return { load: "加载_文件载入: 12ms\n加载_导入文件名: 8ms", scan: "枚举_NTFS: 3.2s" };
+    // ---- 自然语言 / 插件（预览模式下的假数据）----
+    case "nl_status":
+      return {
+        ready: true,
+        plugin: "tinker.nl-zh",
+        name: "自然语言搜索（中文）",
+        version: "1.0.0",
+        engine: { provider: "rules", model: "内置规则引擎", endpoint: "" },
+      };
+    case "nl_parse":
+    case "nl_search": {
+      const nl = {
+        keyword: "",
+        exts: ["pdf"],
+        dirs_only: false,
+        field: "ctime",
+        from_ms: 1,
+        to_ms: 2,
+        label: "今天",
+        score: 0.8,
+        notes: ["类型 pdf", "创建时间 今天"],
+        leftover: [],
+      };
+      return cmd === "nl_parse"
+        ? nl
+        : { fingerprint: 1, count: 12, scanned: 488, nl };
+    }
+    case "plugins_list":
+      return [
+        {
+          id: "tinker.nl-zh",
+          name: "自然语言搜索（中文）",
+          version: "1.0.0",
+          kind: "nlu",
+          description: "把「今天下载的 pdf」这类描述翻译成搜索条件。",
+          author: "tinker",
+          homepage: "",
+          enabled: true,
+          installed_at: 0,
+          source: "builtin",
+          engine: { provider: "rules", model: "内置规则引擎", endpoint: "" },
+          latest: "1.0.0",
+          has_update: false,
+          vocab: 126,
+        },
+      ];
+    case "plugin_market":
+      return [
+        {
+          id: "tinker.nl-zh",
+          name: "自然语言搜索（中文）",
+          version: "1.0.0",
+          kind: "nlu",
+          description: "说人话就能搜：今天下载的 pdf、上个月改过的 word。",
+          author: "tinker",
+          min_app: "1.0.0",
+          download: "builtin:tinker.nl-zh",
+          sha256: "",
+          changelog: "首个版本",
+        },
+      ];
+    case "plugin_market_url":
+      return "";
     default:
       return null;
   }
