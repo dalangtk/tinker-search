@@ -20,9 +20,8 @@ lerna-debug.log*
 chrome.err.txt
 
 # ---------- 本地缓存 / 运行数据 ----------
-# .workbuddy 里既有本地缓存也有需要留档的工作记录：只保留 memory
-.workbuddy/*
-!.workbuddy/memory/
+# 本地 AI 工作目录（工作日志、验证脚本、运行数据），不进版本库
+.workbuddy/
 
 # 应用自身落盘数据（索引库、配置、快照）
 .data/
