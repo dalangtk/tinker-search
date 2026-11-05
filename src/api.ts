@@ -10,8 +10,10 @@ import type {
   NlStatus,
   Place,
   PluginView,
+  RerankOut,
   Row,
   SearchStart,
+  SemanticStatus,
 } from "./types";
 import { mockInvoke, mockListen } from "./mock";
 
@@ -157,4 +159,10 @@ export const api = {
     call<void>("plugin_set_engine", { id, provider, model, endpoint }),
   pluginMarketUrl: () => call<string>("plugin_market_url"),
   setPluginMarketUrl: (url: string) => call<void>("set_plugin_market_url", { url }),
+
+  // ---- 语义引擎（内置 bge-small-zh-v1.5）----
+  semanticStatus: () => call<SemanticStatus>("semantic_status"),
+  semanticWarm: () => call<SemanticStatus>("semantic_warm"),
+  semanticRerank: (query: string, top?: number) =>
+    call<RerankOut>("semantic_rerank", { query, top: top ?? null }),
 };

@@ -37,6 +37,19 @@ export function rowAt(i: number): Row | undefined {
 }
 
 /**
+ * 清空分页缓存但不重置结果总数。
+ *
+ * 语义重排会让后端 `view` 的顺序整体变化，已缓存的行会串位，
+ * 所以重排后必须把缓存作废重新按页取。
+ */
+export function resetPages() {
+  cache.clear();
+  loaded.clear();
+  inflight.clear();
+  epoch.value++;
+}
+
+/**
  * 按索引加载：多选/批量操作时选中的行可能还没进入分页缓存，
  * 这里按页补齐，返回后可安全用 rowAt() 取。
  */

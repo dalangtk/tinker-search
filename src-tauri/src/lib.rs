@@ -8,6 +8,7 @@ mod native;
 mod nlu;
 mod nlu_model;
 mod plugins;
+mod semantic;
 mod shell;
 mod vfs;
 
@@ -349,6 +350,9 @@ pub fn run() {
             commands::plugin_set_engine,
             commands::plugin_market_url,
             commands::set_plugin_market_url,
+            commands::semantic_status,
+            commands::semantic_warm,
+            commands::semantic_rerank,
             commands::get_rows,
             commands::get_row,
             commands::get_icons,

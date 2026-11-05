@@ -48,6 +48,9 @@
       "icons/128x128.png",
       "icons/icon.ico"
     ],
+    "resources": [
+      "assets/models/bge-small-zh-v1.5/*"
+    ],
     "windows": {
       "nsis": {
         "installMode": "currentUser",

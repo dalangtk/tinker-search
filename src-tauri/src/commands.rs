@@ -2,7 +2,7 @@
 
 use crate::config::{match_json, AppConfig};
 use crate::model::{IndexStats, Row, SearchStart};
-use crate::{hotkey, native, plugins, shell, vfs};
+use crate::{hotkey, native, plugins, semantic, shell, vfs};
 use parking_lot::Mutex;
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -234,6 +234,90 @@ pub fn set_plugin_market_url(state: State<'_, AppState>, url: String) -> Result<
     }
     state.update(|c| c.plugins.market_url = url);
     Ok(())
+}
+
+// ============================================================================
+// 语义引擎：内置 bge-small-zh-v1.5
+//
+// 只做「语义重排」——把字面不重合但意思相关的结果提上来。
+// 结构化条件（时间 / 后缀）仍然由规则引擎解析，模型不参与。
+// ============================================================================
+
+// 权重与候选条数在 `config::SemanticCfg` 里，用户可在设置页调。
+
+fn res_dir(app: &AppHandle) -> Option<PathBuf> {
+    app.path().resource_dir().ok()
+}
+
+/// 用户自备模型的目录：`{数据目录}/models/bge-small-zh-v1.5/`
+fn user_model_dir(state: &AppState) -> PathBuf {
+    state.data_dir.join("models")
+}
+
+#[tauri::command]
+pub fn semantic_status(app: AppHandle, state: State<'_, AppState>) -> semantic::Status {
+    let user = user_model_dir(&state);
+    semantic::status(res_dir(&app).as_deref(), Some(user.as_path()))
+}
+
+/// 预加载模型（设置页点「预热」或首次开启语义重排时调用）。
+#[tauri::command]
+pub async fn semantic_warm(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<semantic::Status, String> {
+    let dir = res_dir(&app);
+    let user = user_model_dir(&state);
+    blocking(move || semantic::warm(dir.as_deref(), Some(user.as_path()))).await
+}
+
+#[derive(serde::Serialize)]
+pub struct RerankOut {
+    /// 重排后的前若干行，前端直接替换列表
+    pub rows: Vec<Row>,
+    /// 实际被调整位置的条数
+    pub moved: usize,
+    /// 端到端耗时（含模型加载）
+    pub elapsed_ms: f64,
+    /// 每个候选的语义分，顺序与 `rows` 一致
+    pub scores: Vec<f32>,
+}
+
+/// 对当前结果的前 `top` 条做语义重排。
+#[tauri::command]
+pub async fn semantic_rerank(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    query: String,
+    top: Option<usize>,
+) -> Result<RerankOut, String> {
+    let dir = res_dir(&app);
+    let user = user_model_dir(&state);
+    let cfg = state.get().semantic;
+    blocking(move || {
+        let t = std::time::Instant::now();
+        let n = top.unwrap_or(cfg.top).clamp(1, 2000);
+        let names = native::top_names(n);
+        if names.len() < 2 {
+            return Err("结果太少，无需重排".into());
+        }
+        let docs: Vec<String> = names.iter().map(|(_, s)| s.clone()).collect();
+        let sem = semantic::scores(dir.as_deref(), Some(user.as_path()), &query, &docs)
+            .ok_or_else(|| "语义模型不可用".to_string())?;
+
+        let base: Vec<usize> = (0..docs.len()).collect();
+        let order = semantic::rerank(&base, &sem, cfg.weight.clamp(0.0, 1.0));
+        let ids: Vec<u32> = order.iter().map(|&i| names[i].0).collect();
+        let moved = native::apply_rerank(&ids);
+        let rows = native::rows(0, ids.len() as i32)?;
+        Ok(RerankOut {
+            rows,
+            moved,
+            elapsed_ms: t.elapsed().as_secs_f64() * 1000.0,
+            scores: order.iter().map(|&i| sem[i]).collect(),
+        })
+    })
+    .await
 }
 
 #[tauri::command]

@@ -26,6 +26,9 @@ rayon = "1.12"
 encoding_rs = "0.8"
 # 自然语言搜索的时间解析（本地时区、夏令时正确）
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# 内置语义模型 bge-small-zh-v1.5：ORT 静态链接进 exe，不需要额外 DLL
+ort = { version = "2.0.0-rc.15", features = ["download-binaries"] }
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
 # 原生索引内核（MFT 枚举 + 列式索引 + USN 实时同步）
 sscore = { path = "../sscore" }
 

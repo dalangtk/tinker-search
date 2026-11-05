@@ -950,6 +950,52 @@ pub fn rows(start: i32, count: i32) -> Result<Vec<Row>, String> {
     Ok(out)
 }
 
+/// 取当前视图前 `n` 条的文件名，供语义重排使用。
+///
+/// 不过滤墓碑：返回顺序必须与 `view[..n]` 严格一一对应，否则重排时对不上号。
+pub fn top_names(n: usize) -> Vec<(u32, String)> {
+    let Ok(st) = state() else {
+        return Vec::new();
+    };
+    let c = st.core.read();
+    let take = n.min(c.view.len());
+    c.view[..take]
+        .iter()
+        .map(|&id| {
+            let name = if (id as usize) < c.idx.len() {
+                c.idx.name(id).to_string()
+            } else {
+                String::new()
+            };
+            (id, name)
+        })
+        .collect()
+}
+
+/// 用新的顺序替换视图前段，返回实际调整的条数。
+///
+/// `order` 必须是原 `view[..n]` 的一个排列——否则宁可不动，
+/// 因为错位会让用户看到重复行或丢行。
+pub fn apply_rerank(order: &[u32]) -> usize {
+    let Ok(st) = state() else {
+        return 0;
+    };
+    let mut c = st.core.write();
+    let n = order.len().min(c.view.len());
+    if n == 0 {
+        return 0;
+    }
+    let mut want: Vec<u32> = c.view[..n].to_vec();
+    let mut got: Vec<u32> = order[..n].to_vec();
+    want.sort_unstable();
+    got.sort_unstable();
+    if want != got {
+        return 0;
+    }
+    c.view[..n].copy_from_slice(&order[..n]);
+    n
+}
+
 pub fn row_by_id(id: i32) -> Result<Row, String> {
     let n = state()?;
     let c = n.core.read();
@@ -1304,8 +1350,7 @@ pub fn shutdown() {
 
 #[cfg(test)]
 mod tests {
-    use super::{depth_under, entry_group};
-    use sscore::{Index, IndexBuilder, ROOT_PARENT};
+    use super::depth_under;
 
     /// 排序分组依赖这个层级：1 = 当前目录的直接子项，2 = 孙项……
     #[test]

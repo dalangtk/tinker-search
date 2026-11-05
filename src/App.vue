@@ -35,6 +35,7 @@ import {
   elapsed,
   fingerprint,
   reset,
+  resetPages,
   rowAt,
   searching,
   setIcon,
@@ -419,6 +420,37 @@ async function runSearch(kw?: string) {
   }
 }
 
+/** 语义重排的序号：新搜索进来就作废上一次重排结果 */
+let rerankSeq = 0;
+/** 最近一次重排耗时（毫秒），供状态栏显示 */
+const rerankMs = ref(0);
+
+/**
+ * 语义重排：只在「普通搜索 + 关键词够长」时做。
+ *
+ * 自然语言模式的关键词经常是空的（条件全在时间/后缀里），此时重排没有意义；
+ * 带通配符的查询本身就是精确匹配，也不该被语义分打乱。
+ * 任何失败都静默跳过——语义只是加分项，不该让搜索报错。
+ */
+async function maybeRerank(fp: number) {
+  const s = cfg.value?.semantic;
+  if (!s?.enabled) return;
+  const q = keyword.value.trim();
+  if (q.length < 2 || /[*?]/.test(q)) return;
+  const my = ++rerankSeq;
+  try {
+    const r = await api.semanticRerank(q, s.top);
+    // 期间又搜了新词，或指纹已变，丢弃这次结果
+    if (my !== rerankSeq || fp !== fingerprint.value) return;
+    if (r.moved <= 0) return;
+    resetPages();
+    await ensure(0, 40);
+    rerankMs.value = Math.round(r.elapsed_ms);
+  } catch {
+    // 模型不可用 / 结果太少：保持原顺序
+  }
+}
+
 /** 首页快照（磁盘容量 / 桌面 / 各盘根目录） */
 async function loadHome(force = false) {
   if (homeLoading.value) return;
@@ -752,6 +784,7 @@ function registerEvents() {
     reset(p.count, p.fingerprint);
     total.value = p.count;
     elapsed.value = p.elapsedMs;
+    rerankMs.value = 0; // 新结果：先撤掉上一次的语义标记
     searching.value = false;
     errorMsg.value = "";
     selectSingle(0);
@@ -771,6 +804,8 @@ function registerEvents() {
         const r = rowAt(0);
         if (r && r.id > 0) previewRow.value = r;
       }, 30);
+      // SQL 与自然语言模式的结果本身已被条件精确约束，不做语义重排
+      if (p.searchType !== 2 && p.searchType !== 3) void maybeRerank(p.fingerprint);
     } else {
       previewRow.value = null;
     }
@@ -1707,6 +1742,7 @@ defineExpose({ openSettings });
       :home="browsingHome"
       :count="total"
       :elapsed="elapsed"
+      :rerank-ms="rerankMs"
       :picked-count="sqlMode ? 0 : pickedCount"
       :sql-text="sqlStatText"
       :searching="searching"

@@ -80,6 +80,35 @@ export interface AppConfig {
   boost: { kind: string; value: string; delta: number }[];
   integration: { protocol: boolean };
   plugins: { market_url: string };
+  semantic: { enabled: boolean; weight: number; top: number };
+}
+
+/* ------------------------------ 语义引擎 ------------------------------ */
+
+/** 内置 bge-small-zh-v1.5 的运行时状态 */
+export interface SemanticStatus {
+  /** 模型文件是否随包分发到位 */
+  present: boolean;
+  /** 是否已加载进内存 */
+  loaded: boolean;
+  /** 向量维度 */
+  dim: number;
+  /** 模型体积（MB） */
+  size_mb: number;
+  /** 加载耗时（毫秒） */
+  load_ms: number;
+  dir: string;
+  /** 用的是不是用户自备模型（覆盖内置） */
+  custom: boolean;
+  error: string;
+}
+
+/** 语义重排结果 */
+export interface RerankOut {
+  rows: Row[];
+  moved: number;
+  elapsed_ms: number;
+  scores: number[];
 }
 
 /* ------------------------------ 自然语言搜索 ------------------------------ */
