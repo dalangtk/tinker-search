@@ -9,6 +9,7 @@ Windows 本地文件**即时搜索**工具。基于 **Tauri 2 + Rust + Vue 3**�
 - **版本**：1.0.0
 - **平台**：Windows 10 / 11（x64，NTFS）
 - **安装包**：`tinker搜索_1.0.0_x64-setup.exe`（约 1.9 MB）
+- **协议**：[Apache-2.0](LICENSE)
 
 ## 界面预览
 
@@ -441,7 +442,9 @@ tinker://new?settings=index
 │   ├── src/walk.rs          # 兜底目录遍历
 │   └── src/bin/sscore.rs    # 命令行：建库 / 查询 / 基准 / 同步开销
 ├── index.html
-└── package.json
+├── package.json
+├── LICENSE                  # Apache-2.0
+└── .gitignore
 ```
 
 ## 开发
@@ -507,4 +510,14 @@ A：安装包未做代码签名，属于正常现象。点「更多信息 → �
 
 ## 许可证
 
-本项目暂未附开源许可证文件（保留所有权利）。如需对外分发，请先补充 `LICENSE`。
+本项目基于 [Apache License 2.0](LICENSE) 开源。你可以自由使用、修改与分发，包括商业用途，但需保留版权与许可声明；分发时如修改过文件，须在文件中注明。
+
+```
+Copyright 2026 tinkersearch contributors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+```
