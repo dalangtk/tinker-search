@@ -2,9 +2,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
   AppConfig,
+  DirListing,
   HomeSnapshot,
   IndexStats,
   MarketEntry,
+  MemStat,
   MatchSettings,
   NlQuery,
   NlStatus,
@@ -66,6 +68,9 @@ export const api = {
   cancelSearch: (fingerprint: number) => call<void>("cancel_search", { fingerprint }),
   rows: (start: number, count: number) => call<Row[]>("get_rows", { start, count }),
   row: (id: number) => call<Row>("get_row", { id }),
+  /** 预览面板：列出某个文件夹的直接子项 */
+  listDir: (path: string, limit = 200) =>
+    call<DirListing>("list_dir", { path, limit }),
   icons: (ids: number[], size: number) =>
     call<{ id: number; png: string }[]>("get_icons", { ids, size }),
   previewIcon: (id: number, size: number) => call<string | null>("get_preview_icon", { id, size }),
@@ -85,6 +90,10 @@ export const api = {
   drives: () => call<any[]>("list_drives"),
   homeSnapshot: () => call<HomeSnapshot>("home_snapshot"),
   knownPlaces: () => call<Place[]>("known_places"),
+  /** 性能与内存：进程工作集、索引各列明细、缓存 */
+  memStats: () => call<MemStat>("mem_stats"),
+  /** 整理内存，返回释放的工作集字节数 */
+  trimMemory: () => call<number>("trim_memory"),
   startScan: (drives: string[]) => call<void>("start_scan", { drives }),
   stopScan: () => call<void>("stop_scan"),
   saveDb: () => call<string>("save_db"),

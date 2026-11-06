@@ -24,6 +24,14 @@ const binary = ref(false);
 const loading = ref(false);
 const showAll = ref(false);
 
+// 文件夹：直接子项（不递归）。改名/内容变化后重新拉。
+const kids = ref<Row[]>([]);
+const kidsTotal = ref(0);
+const kidsLoading = ref(false);
+const kidsErr = ref("");
+let kidsSeq = 0;
+
+const isDir = computed(() => !!props.row?.is_dir);
 const kind = computed(() => (props.row ? kindOf(props.row.ext, props.row.is_dir) : "file"));
 const canImage = computed(() => !!props.row && !props.row.is_dir && isImage(props.row.ext));
 const canText = computed(
@@ -55,6 +63,13 @@ watch(
     const r = props.row;
     if (!r) return;
 
+    if (r.is_dir) void loadKids(r.path);
+    else {
+      kids.value = [];
+      kidsTotal.value = 0;
+      kidsErr.value = "";
+    }
+
     loading.value = true;
     try {
       const ic = await api.previewIcon(r.id, 128);
@@ -77,6 +92,26 @@ watch(
   { immediate: true }
 );
 
+/** 拉取目录的直接子项；连点多个文件夹时只认最后一次请求 */
+async function loadKids(path: string) {
+  const my = ++kidsSeq;
+  kidsLoading.value = true;
+  kidsErr.value = "";
+  kids.value = [];
+  kidsTotal.value = 0;
+  try {
+    const res = await api.listDir(path, 200);
+    if (my !== kidsSeq) return;
+    kids.value = res.rows;
+    kidsTotal.value = res.total;
+  } catch (e) {
+    if (my !== kidsSeq) return;
+    kidsErr.value = String(e);
+  } finally {
+    if (my === kidsSeq) kidsLoading.value = false;
+  }
+}
+
 const ext = computed(() => (props.row?.ext || "").toUpperCase());
 </script>
 
@@ -92,13 +127,53 @@ const ext = computed(() => (props.row?.ext || "").toUpperCase());
         <div class="sub">
           <span v-if="props.row.alias" class="alias"><Icon name="tag" :size="10" />{{ props.row.alias }}</span>
           <span>{{ props.row.is_dir ? "文件夹" : formatSize(props.row.size) }}</span>
-          <span v-if="ext" class="dot">·</span>
-          <span v-if="ext">{{ ext }}</span>
+          <template v-if="isDir && kidsTotal">
+            <span class="dot">·</span>
+            <span>{{ kidsTotal }} 项</span>
+          </template>
+          <template v-if="ext">
+            <span class="dot">·</span>
+            <span>{{ ext }}</span>
+          </template>
+        </div>
+        <div v-if="isDir" class="where" :title="props.row.parent">
+          <Icon name="location" :size="10" />
+          <span>{{ props.row.parent }}</span>
         </div>
       </div>
 
       <div class="body">
-        <div v-if="canImage" class="media">
+        <!-- 选中文件夹：直接把里面摆的东西列出来，双击交给系统打开 -->
+        <div v-if="isDir" class="kids">
+          <div class="khead">
+            <span>文件夹内容</span>
+            <span class="knum">{{ kidsLoading ? "读取中…" : `${kidsTotal} 项` }}</span>
+          </div>
+          <div class="ktip">双击任意一项直接打开</div>
+          <div v-if="kidsLoading" class="kempty">读取中…</div>
+          <div v-else-if="kidsErr" class="kempty">{{ kidsErr }}</div>
+          <div v-else-if="!kids.length" class="kempty">空文件夹</div>
+          <div v-else class="klist">
+            <button
+              v-for="k in kids"
+              :key="k.id"
+              class="krow"
+              :title="k.path"
+              @dblclick="emit('open', k)"
+            >
+              <span class="kico" :data-kind="kindOf(k.ext, k.is_dir)">
+                <Icon :name="k.is_dir ? 'folder' : 'doc'" :size="13" />
+              </span>
+              <span class="kname" :class="{ dir: k.is_dir }">{{ k.name }}</span>
+              <span class="ksize num">{{ k.is_dir ? "" : formatSize(k.size) }}</span>
+            </button>
+          </div>
+          <div v-if="kidsTotal > kids.length" class="kmore">
+            只列前 {{ kids.length }} 项，双击文件夹在资源管理器中看全部
+          </div>
+        </div>
+
+        <div v-else-if="canImage" class="media">
           <img :src="imgSrc" :alt="props.row.name" loading="lazy" />
         </div>
 
@@ -331,6 +406,114 @@ const ext = computed(() => (props.row?.ext || "").toUpperCase());
   padding: 5px;
   border-radius: 6px;
   background: var(--accent-soft);
+}
+
+.kids {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.khead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 5px 6px;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+.klist {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.krow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 5px 6px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  font-size: 12px;
+  color: var(--text-2);
+  text-align: left;
+  user-select: none;
+}
+.krow:hover {
+  background: var(--hover);
+}
+.kico {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  color: var(--text-3);
+}
+.kico[data-kind="folder"] {
+  color: #f0b429;
+}
+.kico[data-kind="image"] {
+  color: #4aa8ff;
+}
+.kico[data-kind="code"] {
+  color: #8b7cf6;
+}
+.kico[data-kind="pdf"] {
+  color: #e5645c;
+}
+.kname {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kname.dir {
+  color: var(--text);
+}
+.ksize {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+.kempty {
+  padding: 20px 6px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-3);
+}
+.kmore {
+  margin-top: 6px;
+  padding: 0 5px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+.ktip {
+  margin-bottom: 4px;
+  padding: 0 5px 4px;
+  font-size: 11px;
+  color: var(--text-3);
+  opacity: 0.7;
+}
+.where {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 0 4px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+.where span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
 }
 
 .meta-list {

@@ -18,6 +18,10 @@ pub const FLAG_DIR: u8 = 1;
 /// 墓碑：文件已被（或疑似被）删除。记录本身不搬移，只打标记，
 /// 这样同步线程追加新记录时不需要移动任何已有下标。
 pub const FLAG_TOMB: u8 = 2;
+/// 隐藏：位于回收站 / 系统目录里的记录。文件在磁盘上确实存在，
+/// 但对用户来说「已经删了」，搜索、浏览、SQL 都不该把它列出来。
+/// 和墓碑的区别是保留了名字与父指针，所以从回收站还原时还能原样复活。
+pub const FLAG_HIDE: u8 = 4;
 
 /// 一条记录 = 名字池里的一段字节 + 一个父指针。
 #[derive(Default)]
@@ -69,6 +73,34 @@ impl Index {
     #[inline]
     pub fn is_live(&self, id: u32) -> bool {
         self.flags[id as usize] & FLAG_TOMB == 0
+    }
+
+    #[inline]
+    pub fn is_hidden(&self, id: u32) -> bool {
+        self.flags[id as usize] & FLAG_HIDE != 0
+    }
+
+    /// 该不该出现在结果里：既没被删、也不在回收站/系统目录中。
+    #[inline]
+    pub fn is_visible(&self, id: u32) -> bool {
+        self.flags[id as usize] & (FLAG_TOMB | FLAG_HIDE) == 0
+    }
+
+    /// 打/清隐藏位。从回收站还原文件时要用它把记录放回可见区。
+    #[inline]
+    pub fn set_hidden(&mut self, id: u32, on: bool) {
+        let f = self.flags[id as usize];
+        self.flags[id as usize] = if on { f | FLAG_HIDE } else { f & !FLAG_HIDE };
+    }
+
+    /// 已隐藏（回收站/系统目录内）的记录条数。
+    pub fn hidden_count(&self) -> usize {
+        self.flags.iter().filter(|f| *f & FLAG_HIDE != 0).count()
+    }
+
+    /// 目录条数（不含墓碑）。扫描一遍 flags，500 万条约 2 ms。
+    pub fn dir_count(&self) -> usize {
+        self.flags.iter().filter(|f| **f & FLAG_DIR != 0 && **f & FLAG_TOMB == 0).count()
     }
 
     /// 已删除记录的条数（墓碑）。
@@ -125,6 +157,71 @@ impl Index {
         self.name_off[i] = 0;
     }
 
+    /// 复活一条墓碑记录（FRN 被复用、或文件从回收站还原）。
+    pub fn revive(&mut self, id: u32, name: &[u8], parent: u32, is_dir: bool) {
+        let i = id as usize;
+        self.flags[i] = if is_dir { FLAG_DIR } else { 0 };
+        self.rename(id, name, Some(parent));
+    }
+
+    /// 把卷根下名字命中的目录（回收站、系统卷信息）整棵子树打上隐藏位。
+    ///
+    /// 返回本次新隐藏的记录数。已经在隐藏区里的节点不再往下走，
+    /// 既省一次遍历，也避免脏数据成环时来回绕。
+    pub fn mark_hidden_subtrees(&mut self, names: &[&str]) -> usize {
+        let n = self.len();
+        if n == 0 || names.is_empty() {
+            return 0;
+        }
+        let mut roots: Vec<u32> = Vec::new();
+        for i in 0..n {
+            if self.parent[i] != ROOT_PARENT || !self.is_live(i as u32) {
+                continue;
+            }
+            let name = self.name(i as u32);
+            if names.iter().any(|w| name.eq_ignore_ascii_case(w)) {
+                roots.push(i as u32);
+            }
+        }
+        if roots.is_empty() {
+            return 0;
+        }
+
+        // CSR 子节点索引：start[i]..start[i+1] 是 i 的子节点在 children 里的区间
+        let mut start = vec![0u32; n + 1];
+        for &p in &self.parent {
+            let pi = p as usize;
+            if pi < n {
+                start[pi + 1] += 1;
+            }
+        }
+        for i in 0..n {
+            start[i + 1] += start[i];
+        }
+        let mut cursor = start.clone();
+        let mut children = vec![0u32; start[n] as usize];
+        for (i, &p) in self.parent.iter().enumerate() {
+            let pi = p as usize;
+            if pi < n {
+                children[cursor[pi] as usize] = i as u32;
+                cursor[pi] += 1;
+            }
+        }
+
+        let mut stack = roots;
+        let mut marked = 0usize;
+        while let Some(id) = stack.pop() {
+            let i = id as usize;
+            if i >= n || self.is_hidden(id) || !self.is_live(id) {
+                continue;
+            }
+            self.flags[i] |= FLAG_HIDE;
+            marked += 1;
+            stack.extend_from_slice(&children[start[i] as usize..start[i + 1] as usize]);
+        }
+        marked
+    }
+
     /// 名字池里超过三成是垃圾时，值得整体重建一次。
     pub fn should_compact(&self) -> bool {
         let live_pool = (self.pool.len() as u64).saturating_sub(self.wasted);
@@ -169,13 +266,20 @@ impl Index {
     }
 
     pub fn memory_bytes(&self) -> usize {
-        self.pool.len()
-            + self.parent.len() * 4
-            + self.name_off.len() * 4
-            + self.name_len.len() * 2
-            + self.vol.len() * 2
-            + self.flags.len()
-            + self.frn.len() * 8
+        self.memory_breakdown().iter().map(|(_, b)| *b).sum()
+    }
+
+    /// 逐列占用（字节）。顺序与物理布局一致，性能面板直接照着画占比条。
+    pub fn memory_breakdown(&self) -> Vec<(&'static str, usize)> {
+        vec![
+            ("父指针", self.parent.len() * 4),
+            ("名字偏移", self.name_off.len() * 4),
+            ("名字长度", self.name_len.len() * 2),
+            ("卷号", self.vol.len() * 2),
+            ("标志位", self.flags.len()),
+            ("文件号", self.frn.len() * 8),
+            ("名字池", self.pool.len()),
+        ]
     }
 
     // ---------- 序列化 ----------
@@ -215,39 +319,58 @@ impl Index {
         Ok(std::fs::metadata(path)?.len())
     }
 
+    /// 从磁盘读索引。分列流式读取：不再把整个库文件读进内存缓冲再逐列拷贝，
+    /// 加载峰值从「库文件 + 列」降到「列 + 一个 64 KB 分块」。
     pub fn load(path: &Path) -> io::Result<Index> {
-        let mut buf = Vec::new();
-        File::open(path)?.read_to_end(&mut buf)?;
-        Index::from_bytes(&buf)
+        let f = File::open(path)?;
+        let mut r = io::BufReader::with_capacity(1 << 20, f);
+        Index::from_reader(&mut r)
     }
 
     pub fn from_bytes(buf: &[u8]) -> io::Result<Index> {
-        if buf.len() < 16 || &buf[0..8] != MAGIC {
+        Index::from_reader(&mut &buf[..])
+    }
+
+    pub fn from_reader<R: Read>(r: &mut R) -> io::Result<Index> {
+        let mut head = [0u8; 16];
+        r.read_exact(&mut head)?;
+        if &head[0..8] != MAGIC {
             return Err(bad("魔数不匹配，不是本内核的索引库"));
         }
-        let version = u32::from_le_bytes(buf[8..12].try_into().unwrap());
+        let version = u32::from_le_bytes(head[8..12].try_into().unwrap());
         if version != VERSION {
             return Err(bad("索引库版本不支持"));
         }
-        let vcount = u32::from_le_bytes(buf[12..16].try_into().unwrap()) as usize;
-        let mut p = 16usize;
+        let vcount = u32::from_le_bytes(head[12..16].try_into().unwrap()) as usize;
         let mut volumes = Vec::with_capacity(vcount);
+        let mut lenbuf = [0u8; 2];
         for _ in 0..vcount {
-            let l = u16::from_le_bytes(need(buf, &mut p, 2)?.try_into().unwrap()) as usize;
-            let s = need(buf, &mut p, l)?;
-            volumes.push(String::from_utf8_lossy(s).into_owned());
+            r.read_exact(&mut lenbuf)?;
+            let l = u16::from_le_bytes(lenbuf) as usize;
+            if l > 4096 {
+                return Err(bad("卷标长度异常"));
+            }
+            let mut b = vec![0u8; l];
+            r.read_exact(&mut b)?;
+            volumes.push(String::from_utf8_lossy(&b).into_owned());
         }
-        let n = u64::from_le_bytes(need(buf, &mut p, 8)?.try_into().unwrap()) as usize;
-        let pool_len = u64::from_le_bytes(need(buf, &mut p, 8)?.try_into().unwrap()) as usize;
-        let wasted = u64::from_le_bytes(need(buf, &mut p, 8)?.try_into().unwrap());
+        let mut nbuf = [0u8; 8];
+        r.read_exact(&mut nbuf)?;
+        let n = u64::from_le_bytes(nbuf) as usize;
+        r.read_exact(&mut nbuf)?;
+        let pool_len = u64::from_le_bytes(nbuf) as usize;
+        r.read_exact(&mut nbuf)?;
+        let wasted = u64::from_le_bytes(nbuf);
 
-        let parent = read_u32s(buf, &mut p, n)?;
-        let name_off = read_u32s(buf, &mut p, n)?;
-        let name_len = read_u16s(buf, &mut p, n)?;
-        let vol = read_u16s(buf, &mut p, n)?;
-        let flags = need(buf, &mut p, n)?.to_vec();
-        let frn = read_u64s(buf, &mut p, n)?;
-        let pool = need(buf, &mut p, pool_len)?.to_vec();
+        let parent = read_u32s(r, n)?;
+        let name_off = read_u32s(r, n)?;
+        let name_len = read_u16s(r, n)?;
+        let vol = read_u16s(r, n)?;
+        let mut flags = vec![0u8; n];
+        r.read_exact(&mut flags)?;
+        let frn = read_u64s(r, n)?;
+        let mut pool = vec![0u8; pool_len];
+        r.read_exact(&mut pool)?;
         Ok(Index { volumes, parent, name_off, name_len, vol, flags, pool, frn, wasted })
     }
 
@@ -282,52 +405,73 @@ fn bad(msg: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.to_string())
 }
 
-fn need<'a>(buf: &'a [u8], p: &mut usize, n: usize) -> io::Result<&'a [u8]> {
-    if *p + n > buf.len() {
-        return Err(bad("索引库被截断"));
-    }
-    let s = &buf[*p..*p + n];
-    *p += n;
-    Ok(s)
-}
+// 落盘也走定长小缓冲：整列先拼成 Vec 会在保存时凭空多占一整列内存。
+const WBUF: usize = 64 * 1024;
 
 fn write_u32s<W: Write>(w: &mut W, v: &[u32]) -> io::Result<()> {
-    let mut tmp = Vec::with_capacity(v.len() * 4);
-    for x in v {
-        tmp.extend_from_slice(&x.to_le_bytes());
+    let mut tmp = [0u8; WBUF];
+    for chunk in v.chunks(WBUF / 4) {
+        for (i, x) in chunk.iter().enumerate() {
+            tmp[i * 4..i * 4 + 4].copy_from_slice(&x.to_le_bytes());
+        }
+        w.write_all(&tmp[..chunk.len() * 4])?;
     }
-    w.write_all(&tmp)
+    Ok(())
 }
 
 fn write_u16s<W: Write>(w: &mut W, v: &[u16]) -> io::Result<()> {
-    let mut tmp = Vec::with_capacity(v.len() * 2);
-    for x in v {
-        tmp.extend_from_slice(&x.to_le_bytes());
+    let mut tmp = [0u8; WBUF];
+    for chunk in v.chunks(WBUF / 2) {
+        for (i, x) in chunk.iter().enumerate() {
+            tmp[i * 2..i * 2 + 2].copy_from_slice(&x.to_le_bytes());
+        }
+        w.write_all(&tmp[..chunk.len() * 2])?;
     }
-    w.write_all(&tmp)
+    Ok(())
 }
 
 fn write_u64s<W: Write>(w: &mut W, v: &[u64]) -> io::Result<()> {
-    let mut tmp = Vec::with_capacity(v.len() * 8);
-    for x in v {
-        tmp.extend_from_slice(&x.to_le_bytes());
+    let mut tmp = [0u8; WBUF];
+    for chunk in v.chunks(WBUF / 8) {
+        for (i, x) in chunk.iter().enumerate() {
+            tmp[i * 8..i * 8 + 8].copy_from_slice(&x.to_le_bytes());
+        }
+        w.write_all(&tmp[..chunk.len() * 8])?;
     }
-    w.write_all(&tmp)
+    Ok(())
 }
 
-fn read_u64s(buf: &[u8], p: &mut usize, n: usize) -> io::Result<Vec<u64>> {
-    let s = need(buf, p, n * 8)?;
-    Ok(s.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect())
+/// 按 64 KB 分块把定宽列读进 Vec：容量一次到位，逐块解码，
+/// 不额外持有整列字节缓冲。
+fn read_fixed<R: Read, const W: usize, T>(
+    r: &mut R,
+    n: usize,
+    conv: impl Fn([u8; W]) -> T,
+) -> io::Result<Vec<T>> {
+    const CHUNK: usize = 64 * 1024;
+    let total = n.saturating_mul(W);
+    let mut out: Vec<T> = Vec::with_capacity(n);
+    let mut buf = [0u8; CHUNK];
+    let mut done = 0usize;
+    while done < total {
+        let want = (total - done).min(CHUNK);
+        r.read_exact(&mut buf[..want])?;
+        out.extend(buf[..want].chunks_exact(W).map(|c| conv(c.try_into().unwrap())));
+        done += want;
+    }
+    Ok(out)
 }
 
-fn read_u32s(buf: &[u8], p: &mut usize, n: usize) -> io::Result<Vec<u32>> {
-    let s = need(buf, p, n * 4)?;
-    Ok(s.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect())
+fn read_u64s<R: Read>(r: &mut R, n: usize) -> io::Result<Vec<u64>> {
+    read_fixed::<R, 8, u64>(r, n, u64::from_le_bytes)
 }
 
-fn read_u16s(buf: &[u8], p: &mut usize, n: usize) -> io::Result<Vec<u16>> {
-    let s = need(buf, p, n * 2)?;
-    Ok(s.chunks_exact(2).map(|c| u16::from_le_bytes(c.try_into().unwrap())).collect())
+fn read_u32s<R: Read>(r: &mut R, n: usize) -> io::Result<Vec<u32>> {
+    read_fixed::<R, 4, u32>(r, n, u32::from_le_bytes)
+}
+
+fn read_u16s<R: Read>(r: &mut R, n: usize) -> io::Result<Vec<u16>> {
+    read_fixed::<R, 2, u16>(r, n, u16::from_le_bytes)
 }
 
 /// 建库阶段的累加器：先按任意顺序 push，再回填父指针。

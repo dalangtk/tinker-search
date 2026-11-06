@@ -285,7 +285,8 @@ fn score_record(
     opts: &QueryOpts,
 ) -> Option<i32> {
     // 墓碑（已删除）记录直接跳过。名字已清空，不判的话空串会匹配任何查询。
-    if !idx.is_live(id) {
+    // 回收站/系统目录里的记录名字还在，但用户认为它们「已经删了」，同样跳过。
+    if !idx.is_visible(id) {
         return None;
     }
     if !matches_filter(idx, id, &opts.filter) {
@@ -403,7 +404,7 @@ pub fn browse(idx: &Index, filter: &Filter, limit: usize) -> Vec<Hit> {
             let start = c * CHUNK;
             let end = ((c + 1) * CHUNK).min(n);
             for id in start..end {
-                if !idx.is_live(id) {
+                if !idx.is_visible(id) {
                     continue;
                 }
                 if matches_filter(idx, id, filter) {

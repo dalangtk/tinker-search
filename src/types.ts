@@ -18,6 +18,12 @@ export interface Row {
   hl_alias: string[];
 }
 
+/** 预览面板用：一个目录的直接子项 */
+export interface DirListing {
+  total: number;
+  rows: Row[];
+}
+
 export interface SearchStart {
   fingerprint: number;
   accepted: boolean;
@@ -164,6 +170,52 @@ export interface IndexStats {
   admin: boolean;
   /** 启动阶段待展示的一句提示，读过即清空 */
   notice: string | null;
+}
+
+/** 索引内存里的一项（某一列 / 某块缓存） */
+export interface MemPart {
+  name: string;
+  bytes: number;
+  /** 占索引内存的千分比 */
+  per_mille: number;
+}
+
+/** 「设置 → 性能与内存」的整页数据 */
+export interface MemStat {
+  /** 主进程专用工作集：和任务管理器「内存」列同口径 */
+  private_working_set: number;
+  /** 主进程工作集：含与其他进程共享的 DLL/映像页，恒大于等于上面那个 */
+  working_set: number;
+  peak_working_set: number;
+  private_bytes: number;
+  /** 主进程 + 辅助进程合计，不含 WebView2 界面进程 */
+  total_working_set: number;
+  total_private_working_set: number;
+  process_count: number;
+  /** WebView2 界面进程合计（只做说明，不计入上面两项） */
+  webview_bytes: number;
+  webview_private_bytes: number;
+  webview_count: number;
+  sys_total: number;
+  sys_avail: number;
+  sys_load: number;
+  index_bytes: number;
+  index_parts: MemPart[];
+  frn_map_bytes: number;
+  journal_bytes: number;
+  cache_bytes: number;
+  db_file_bytes: number;
+  records: number;
+  dirs: number;
+  files: number;
+  hidden_records: number;
+  tomb_records: number;
+  bytes_per_record: number;
+  indexed_volumes: string;
+  load_ms: number;
+  syncing: boolean;
+  sync_text: string;
+  admin: boolean;
 }
 
 export interface ModeDef {

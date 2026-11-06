@@ -7,7 +7,7 @@
 //! 能力边界：建库 / 搜索 / 分类筛选 / 目录范围 / SQL / 实时同步。
 //! 没有 Lua 脚本、图标缓存、别名与评分，相应命令在命令层返回空结果或 no-op。
 
-use crate::model::{IndexStats, Row, SearchStart};
+use crate::model::{DirListing, IndexStats, MemPart, MemStat, Row, SearchStart};
 use once_cell::sync::OnceCell;
 use parking_lot::{Mutex, RwLock};
 use rayon::prelude::*;
@@ -27,7 +27,116 @@ fn emit(app: &AppHandle, name: &str, payload: serde_json::Value) {
 extern "system" {
     fn GetLogicalDrives() -> u32;
     fn GetDriveTypeW(lprootpathname: *const u16) -> u32;
+    fn GetCurrentProcess() -> *mut std::ffi::c_void;
+    fn GetCurrentProcessId() -> u32;
+    fn SetProcessWorkingSetSize(h: *mut std::ffi::c_void, min: usize, max: usize) -> i32;
+    fn GlobalMemoryStatusEx(ptr: *mut MemoryStatusEx) -> i32;
+    fn CreateToolhelp32Snapshot(flags: u32, pid: u32) -> isize;
+    fn Process32FirstW(snap: isize, entry: *mut ProcessEntry32W) -> i32;
+    fn Process32NextW(snap: isize, entry: *mut ProcessEntry32W) -> i32;
+    fn OpenProcess(access: u32, inherit: i32, pid: u32) -> isize;
+    fn CloseHandle(h: isize) -> i32;
 }
+
+#[link(name = "psapi")]
+extern "system" {
+    fn GetProcessMemoryInfo(
+        process: *mut std::ffi::c_void,
+        counters: *mut ProcessMemoryCountersEx2,
+        cb: u32,
+    ) -> i32;
+}
+
+/// 与 Windows `PROCESS_MEMORY_COUNTERS_EX2` 对齐（Win8+）。
+///
+/// 比老的 `PROCESS_MEMORY_COUNTERS` 多三个字段，其中
+/// `private_working_set_size` 正是任务管理器「内存」那一列的取数口径，
+/// 所以这里直接要 EX2，省得面板和工作管理器对不上。
+#[repr(C)]
+#[derive(Default)]
+struct ProcessMemoryCountersEx2 {
+    cb: u32,
+    page_fault_count: u32,
+    peak_working_set_size: usize,
+    working_set_size: usize,
+    quota_peak_paged_pool_usage: usize,
+    quota_paged_pool_usage: usize,
+    quota_peak_non_paged_pool_usage: usize,
+    quota_non_paged_pool_usage: usize,
+    pagefile_usage: usize,
+    peak_pagefile_usage: usize,
+    /// 私有提交（= 任务管理器「提交大小」）
+    private_usage: usize,
+    /// 专用工作集（= 任务管理器「内存」，已实测与 WMI WorkingSetPrivate 一致）
+    private_working_set_size: usize,
+    /// 共享提交
+    shared_commit_usage: u64,
+}
+
+/// 一个进程的内存读数，单位字节。
+#[derive(Default, Clone, Copy)]
+struct ProcMem {
+    /// 工作集：常驻物理页，含与其他进程共享的 DLL / 映像页
+    ws: i64,
+    /// 专用工作集：只算独占的页，任务管理器「内存」列用的就是它
+    private_ws: i64,
+    peak_ws: i64,
+    /// 私有提交
+    commit: i64,
+}
+
+/// 与 Windows `MEMORYSTATUSEX` 对齐。
+#[repr(C)]
+#[derive(Default)]
+struct MemoryStatusEx {
+    length: u32,
+    memory_load: u32,
+    total_phys: u64,
+    avail_phys: u64,
+    total_page_file: u64,
+    avail_page_file: u64,
+    total_virtual: u64,
+    avail_virtual: u64,
+    avail_extended_virtual: u64,
+}
+
+/// 与 Windows `PROCESSENTRY32W` 对齐（x64 下 `ULONG_PTR` 是 8 字节）。
+#[repr(C)]
+struct ProcessEntry32W {
+    dw_size: u32,
+    cnt_usage: u32,
+    th32_process_id: u32,
+    th32_default_heap_id: usize,
+    th32_module_id: u32,
+    cnt_threads: u32,
+    th32_parent_process_id: u32,
+    pc_pri_class_base: i32,
+    dw_flags: u32,
+    sz_exe_file: [u16; 260],
+}
+
+// 数组超过 32 个元素时 `[u16; 260]` 没有 Default，只能手写。
+impl Default for ProcessEntry32W {
+    fn default() -> Self {
+        ProcessEntry32W {
+            dw_size: 0,
+            cnt_usage: 0,
+            th32_process_id: 0,
+            th32_default_heap_id: 0,
+            th32_module_id: 0,
+            cnt_threads: 0,
+            th32_parent_process_id: 0,
+            pc_pri_class_base: 0,
+            dw_flags: 0,
+            sz_exe_file: [0u16; 260],
+        }
+    }
+}
+
+const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+const PROCESS_VM_READ: u32 = 0x0010;
+const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
+const SNAP_INVALID: isize = -1;
 
 /// 文件类型分类表。名字、代号保持稳定，前端侧栏不需要换一套数据；
 /// 「后缀」交给内核做匹配。
@@ -94,7 +203,8 @@ struct Core {
 
 pub struct Native {
     core: RwLock<Core>,
-    sync: Mutex<Option<Syncer>>,
+    /// 每个卷一个 Syncer（卷内 FRN 各自独立，不能合并成一张表）
+    sync: Mutex<Vec<Syncer>>,
     db: Mutex<PathBuf>,
     ready: AtomicBool,
     scanning: AtomicBool,
@@ -104,6 +214,8 @@ pub struct Native {
     progress: Mutex<f64>,
     notice: Mutex<Option<String>>,
     sync_stats: Mutex<SyncStats>,
+    /// 上次加载索引耗时（毫秒），性能面板展示
+    load_ms: Mutex<i64>,
 }
 
 static NATIVE: OnceCell<Native> = OnceCell::new();
@@ -126,7 +238,7 @@ pub fn init(db: PathBuf) {
             meta: HashMap::new(),
             mode: 0,
         }),
-        sync: Mutex::new(None),
+        sync: Mutex::new(Vec::new()),
         db: Mutex::new(db),
         ready: AtomicBool::new(false),
         scanning: AtomicBool::new(false),
@@ -135,6 +247,7 @@ pub fn init(db: PathBuf) {
         progress: Mutex::new(0.0),
         notice: Mutex::new(None),
         sync_stats: Mutex::new(SyncStats::default()),
+        load_ms: Mutex::new(0),
     });
 }
 
@@ -161,9 +274,19 @@ pub fn load(app: &AppHandle) -> Result<usize, String> {
     }
     let t = Instant::now();
     match Index::load(&path) {
-        Ok(idx) => {
+        Ok(mut idx) => {
+            // 老库（这版之前建的）里回收站、系统卷信息的记录还带着可见状态，
+            // 加载时补一次隐藏位即可，不用重建索引。已经标过的库直接跳过，
+            // 免得每次启动都白扫 500 万条。
+            if idx.hidden_count() == 0 {
+                let hidden = sscore::mark_hidden(&mut idx);
+                if hidden > 0 {
+                    let _ = idx.save(&path);
+                }
+            }
             let live = idx.live_count();
             let ms = t.elapsed().as_millis();
+            *n.load_ms.lock() = ms as i64;
             {
                 let mut c = n.core.write();
                 c.idx = idx;
@@ -175,13 +298,7 @@ pub fn load(app: &AppHandle) -> Result<usize, String> {
 
             // 索引一就绪就把 USN 同步挂上，后面进程活着期间索引自己保鲜。
             // 非管理员打不开卷句柄，start_sync 会把原因写进 notice。
-            let first = {
-                let c = n.core.read();
-                c.idx.volumes.first().and_then(|v| v.chars().next())
-            };
-            if let Some(letter) = first {
-                start_sync(app.clone(), letter);
-            }
+            start_sync(app.clone());
             Ok(live)
         }
         Err(e) => {
@@ -959,6 +1076,43 @@ pub fn row_by_id(id: i32) -> Result<Row, String> {
     Ok(row_of(&c.idx, id as u32))
 }
 
+/// 列出某个目录的**直接子项**（预览面板用，不递归）。
+///
+/// 和 `search` 带 scope 的目录浏览不同：那是「这个子树里有什么」，
+/// 这个是「这个文件夹里摆着什么」，跟资源管理器双击进去看到的一层一致。
+/// 目录在前、同类按名字排；只给前 `limit` 条读磁盘元数据。
+pub fn list_dir(path: &str, limit: i32) -> Result<DirListing, String> {
+    let n = state()?;
+    let c = n.core.read();
+    let idx = &c.idx;
+    let Some(parent) = resolve_path(idx, path) else {
+        // 空目录也会 resolve 到、只是没子项；resolve 不到说明索引里没有这条路径
+        // （比如普通权限下的静态快照，或索引建好之后才新建的目录）。
+        return Err("索引里没有这个文件夹的内容".into());
+    };
+    if !idx.is_live(parent) || !idx.is_dir(parent) {
+        return Err("索引里没有这个文件夹的内容".into());
+    }
+
+    let mut kids: Vec<u32> = Vec::new();
+    for (i, p) in idx.parent.iter().enumerate() {
+        // 先比父指针（一列连续内存，最便宜），再判可见
+        if *p == parent {
+            let id = i as u32;
+            if idx.is_visible(id) {
+                kids.push(id);
+            }
+        }
+    }
+    let total = kids.len();
+    kids.sort_by_cached_key(|&id| (!idx.is_dir(id), idx.name(id).to_ascii_lowercase()));
+
+    let cap = limit.clamp(1, 1000) as usize;
+    kids.truncate(cap);
+    let rows = kids.into_iter().map(|id| row_of(idx, id)).collect();
+    Ok(DirListing { total: total as i32, rows })
+}
+
 // ============================================================================
 // 状态
 // ============================================================================
@@ -994,6 +1148,267 @@ pub fn stats() -> IndexStats {
         notice: n.notice.lock().clone(),
         admin: crate::shell::is_admin(),
     }
+}
+
+// ============================================================================
+// 内存
+// ============================================================================
+
+/// `PROCESS_MEMORY_COUNTERS_EX` 的字节数（EX2 多两个字段，去掉它们就是 EX）。
+const CB_EX: u32 = std::mem::size_of::<ProcessMemoryCountersEx2>() as u32 - 16;
+
+/// 老系统不认 EX2 时退化成 EX：专用工作集拿不到，就直接用工作集顶上，
+/// 免得面板显示 0 MB。
+fn to_proc_mem(c: &ProcessMemoryCountersEx2) -> ProcMem {
+    let ws = c.working_set_size as i64;
+    let private_ws = c.private_working_set_size as i64;
+    ProcMem {
+        ws,
+        private_ws: if private_ws > 0 { private_ws } else { ws },
+        peak_ws: c.peak_working_set_size as i64,
+        commit: c.private_usage as i64,
+    }
+}
+
+/// 读一个进程句柄的内存计数；EX2 失败就退到 EX 再试一次。
+fn read_counters(h: *mut std::ffi::c_void) -> Option<ProcMem> {
+    let mut c = ProcessMemoryCountersEx2 {
+        cb: std::mem::size_of::<ProcessMemoryCountersEx2>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetProcessMemoryInfo(h, &mut c, c.cb) } != 0 {
+        return Some(to_proc_mem(&c));
+    }
+    let mut e = ProcessMemoryCountersEx2 { cb: CB_EX, ..Default::default() };
+    if unsafe { GetProcessMemoryInfo(h, &mut e, e.cb) } != 0 {
+        return Some(to_proc_mem(&e));
+    }
+    None
+}
+
+/// 本进程的内存读数。
+fn process_memory() -> ProcMem {
+    read_counters(unsafe { GetCurrentProcess() }).unwrap_or_default()
+}
+
+/// 指定进程的内存读数；打不开（权限/已退出）就当 0。
+fn process_mem_of(pid: u32) -> ProcMem {
+    let h = unsafe {
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, 0, pid)
+    };
+    if h == 0 {
+        return ProcMem::default();
+    }
+    let out = read_counters(h as *mut std::ffi::c_void);
+    unsafe { CloseHandle(h) };
+    out.unwrap_or_default()
+}
+
+/// 主进程 + 它的所有后代进程的工作集合计。
+///
+/// WebView2 的渲染/GPU/网络进程都是本进程的子进程（任务管理器里分成好几行），
+/// 只看主进程会低报很多，所以按父子关系把整棵树加起来。
+/// 进程树的内存分布：引擎自身 vs WebView2 界面进程。
+#[derive(Default)]
+struct FamilyUsage {
+    /// 不含 WebView2 的合计（本进程 + 将来可能的辅助进程），工作集
+    engine_bytes: i64,
+    /// 同上，专用工作集（任务管理器口径）
+    engine_private: i64,
+    engine_procs: i32,
+    /// WebView2 渲染 / GPU / 网络 / 崩溃处理进程，面板里只做说明，不计入
+    webview_bytes: i64,
+    webview_private: i64,
+    webview_procs: i32,
+}
+
+/// WebView2 的进程可执行文件名。渲染、GPU、网络、crashpad 都是这个名字。
+fn is_webview_exe(exe: &str) -> bool {
+    let n = exe.to_ascii_lowercase();
+    n.contains("msedgewebview2") || n.contains("webview2")
+}
+
+/// 本进程 + 后代进程的工作集，按引擎 / WebView2 分开。
+///
+/// 早先整棵进程树一把加起来，界面渲染（几百 MB 的 WebView2）全算成了「搜索占用」，
+/// 数字既不可控也没法优化。界面属于外壳，不该混进引擎账上，所以分开统计：
+/// 引擎侧算总和，WebView2 单独列出来提醒"这块没算进去"。
+fn app_family_working_set() -> FamilyUsage {
+    let me = unsafe { GetCurrentProcessId() };
+    let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snap == SNAP_INVALID {
+        let m = process_memory();
+        return FamilyUsage {
+            engine_bytes: m.ws,
+            engine_private: m.private_ws,
+            engine_procs: 1,
+            ..Default::default()
+        };
+    }
+    let mut list: Vec<(u32, u32, String)> = Vec::with_capacity(512);
+    let mut e = ProcessEntry32W {
+        dw_size: std::mem::size_of::<ProcessEntry32W>() as u32,
+        ..Default::default()
+    };
+    let mut ok = unsafe { Process32FirstW(snap, &mut e) } != 0;
+    while ok {
+        let len = e.sz_exe_file.iter().position(|c| *c == 0).unwrap_or(e.sz_exe_file.len());
+        list.push((
+            e.th32_process_id,
+            e.th32_parent_process_id,
+            String::from_utf16_lossy(&e.sz_exe_file[..len]),
+        ));
+        ok = unsafe { Process32NextW(snap, &mut e) } != 0;
+    }
+    unsafe { CloseHandle(snap) };
+
+    // 从本进程出发做一次 BFS，收集整棵进程树
+    let mut members: Vec<u32> = vec![me];
+    let mut i = 0;
+    while i < members.len() {
+        let p = members[i];
+        for (pid, ppid, _) in list.iter() {
+            if *ppid == p && !members.contains(pid) {
+                members.push(*pid);
+            }
+        }
+        i += 1;
+    }
+
+    let mut out = FamilyUsage::default();
+    for pid in members {
+        let exe = list.iter().find(|(p, _, _)| *p == pid).map(|x| x.2.as_str()).unwrap_or("");
+        let m = process_mem_of(pid);
+        if is_webview_exe(exe) {
+            out.webview_bytes += m.ws;
+            out.webview_private += m.private_ws;
+            out.webview_procs += 1;
+        } else {
+            out.engine_bytes += m.ws;
+            out.engine_private += m.private_ws;
+            out.engine_procs += 1;
+        }
+    }
+    out
+}
+
+fn system_memory() -> (i64, i64, i32) {
+    let mut m = MemoryStatusEx {
+        length: std::mem::size_of::<MemoryStatusEx>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GlobalMemoryStatusEx(&mut m) } == 0 {
+        return (0, 0, 0);
+    }
+    (m.total_phys as i64, m.avail_phys as i64, m.memory_load as i32)
+}
+
+/// 「设置 → 性能与内存」的整页数据。
+pub fn mem_stats() -> MemStat {
+    let Some(n) = NATIVE.get() else {
+        return MemStat::default();
+    };
+    let me = process_memory();
+    let fam = app_family_working_set();
+    let (sys_total, sys_avail, sys_load) = system_memory();
+
+    let (index_bytes, parts, cache, records, dirs, hidden, tomb, bpr, vols, live_files) = {
+        let c = n.core.read();
+        let idx = &c.idx;
+        let index_bytes = idx.memory_bytes();
+        let parts: Vec<MemPart> = idx
+            .memory_breakdown()
+            .into_iter()
+            .map(|(name, bytes)| MemPart {
+                name: name.to_string(),
+                bytes: bytes as i64,
+                per_mille: if index_bytes == 0 {
+                    0
+                } else {
+                    (bytes * 1000 / index_bytes) as i32
+                },
+            })
+            .collect();
+        // 运行时缓存：命中集、重排视图、按大小/时间排序的元数据
+        let cache = c.hits.capacity() * std::mem::size_of::<Hit>()
+            + c.view.capacity() * 4
+            + c.meta.capacity() * 40;
+        let live = idx.live_count();
+        let dirs = idx.dir_count();
+        (
+            index_bytes,
+            parts,
+            cache,
+            idx.len(),
+            dirs,
+            idx.hidden_count(),
+            idx.tomb_count(),
+            idx.bytes_per_record(),
+            idx.volumes.join(", "),
+            live - dirs,
+        )
+    };
+
+    // 锁顺序保持 core → sync，和泵线程一致
+    let (frn_map, journal) = {
+        let s = n.sync.lock();
+        s.iter().fold((0usize, 0usize), |(f, j), x| {
+            (f + x.frn_map_bytes(), j + x.journal_bytes())
+        })
+    };
+
+    let db_file = n
+        .db
+        .lock()
+        .metadata()
+        .map(|m| m.len() as i64)
+        .unwrap_or(0);
+
+    MemStat {
+        working_set: me.ws,
+        private_working_set: me.private_ws,
+        peak_working_set: me.peak_ws,
+        private_bytes: me.commit,
+        total_working_set: fam.engine_bytes,
+        total_private_working_set: fam.engine_private,
+        process_count: fam.engine_procs,
+        webview_bytes: fam.webview_bytes,
+        webview_private_bytes: fam.webview_private,
+        webview_count: fam.webview_procs,
+        sys_total,
+        sys_avail,
+        sys_load,
+        index_bytes: index_bytes as i64,
+        index_parts: parts,
+        frn_map_bytes: frn_map as i64,
+        journal_bytes: journal as i64,
+        cache_bytes: cache as i64,
+        db_file_bytes: db_file,
+        records: records as i32,
+        dirs: dirs as i32,
+        files: live_files as i32,
+        hidden_records: hidden as i32,
+        tomb_records: tomb as i32,
+        bytes_per_record: bpr,
+        indexed_volumes: vols,
+        load_ms: *n.load_ms.lock(),
+        syncing: n.syncing.load(Ordering::SeqCst),
+        sync_text: n.sync_stats.lock().summary(),
+        admin: crate::shell::is_admin(),
+    }
+}
+
+/// 把本进程的物理页交还给系统（`SetProcessWorkingSetSize(-1, -1)`）。
+///
+/// 语义要说清楚：这只是让任务管理器里的「内存」掉下来，提交量不变；
+/// 下次搜索要重新缺页读入，会有一次轻微卡顿。返回释放的工作集字节数。
+pub fn trim_memory() -> i64 {
+    let before = process_memory().ws;
+    unsafe {
+        SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
+    let after = process_memory().ws;
+    (before - after).max(0)
 }
 
 /// 同步的详细计数，供性能面板显示。
@@ -1034,6 +1449,10 @@ fn merge(dst: &mut Index, src: Index, label: &str) -> usize {
         let parent = if p == sscore::ROOT_PARENT || p as usize >= n { sscore::ROOT_PARENT } else { base + p };
         let id = dst.push_live(vol, src.frn[i], src.name_bytes(i as u32), src.is_dir(i as u32));
         dst.parent[id as usize] = parent;
+        // 回收站/系统目录的隐藏位要跟着搬，否则每个盘的记录合并后就"晾"出来了。
+        if src.flags[i] & sscore::store::FLAG_HIDE != 0 {
+            dst.set_hidden(id, true);
+        }
     }
     n
 }
@@ -1165,6 +1584,9 @@ pub fn start_scan(app: AppHandle, drives: Vec<String>, excluded: Vec<String>) {
             c.sql = None;
             c.places.clear();
         }
+        // 索引换成新的了：旧 Syncer 的 FRN 表绑的是旧索引的下标，
+        // 先摘掉，免得泵线程在新索引上按旧表写错记录。
+        n.sync.lock().clear();
         n.ready.store(true, Ordering::SeqCst);
         n.scanning.store(false, Ordering::SeqCst);
         *n.notice.lock() = save_err.clone();
@@ -1181,12 +1603,8 @@ pub fn start_scan(app: AppHandle, drives: Vec<String>, excluded: Vec<String>) {
             }),
         );
 
-        // 建库完成立刻把第一个盘的同步挂上，索引在后台自己保鲜。
-        if let Some(first) = drives.first() {
-            if let Ok(letter) = sscore::mft::normalize_letter(first) {
-                start_sync(app, letter);
-            }
-        }
+        // 建库完成立刻把每个盘的同步都挂上，索引在后台自己保鲜。
+        start_sync(app);
     });
 }
 
@@ -1203,7 +1621,12 @@ pub fn save_db() -> Result<u64, String> {
         return Err("索引为空，不保存".into());
     }
     let path = n.db.lock().clone();
-    c.idx.save(&path).map_err(|e| e.to_string())
+    let r = c.idx.save(&path).map_err(|e| e.to_string());
+    drop(c);
+    // 索引和断点一起落盘：只存索引不存断点，下次启动就得跳过历史，
+    // 没开应用那段时间新建的文件就再也补不回来了。
+    save_sync_state();
+    r
 }
 
 /// 从当前索引里移除某个目录及其子树，返回移除的记录数。
@@ -1223,72 +1646,250 @@ pub fn remove_path(path: &str) -> i32 {
 // 实时同步
 // ============================================================================
 
-/// 给第一个盘挂上 USN 监听。已经在跑就直接复用。
-pub fn start_sync(app: AppHandle, letter: char) {
+/// 断点文件：和索引放在一起，记录每个卷上次读到哪一条 USN。
+fn sync_state_path() -> PathBuf {
+    let mut p = db_path();
+    p.set_extension("sync.json");
+    p
+}
+
+fn read_sync_state() -> HashMap<String, (u64, i64)> {
+    let Ok(text) = std::fs::read_to_string(sync_state_path()) else {
+        return HashMap::new();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return HashMap::new();
+    };
+    let mut out = HashMap::new();
+    if let Some(obj) = v.as_object() {
+        for (k, val) in obj {
+            let id = val.get("journal").and_then(|x| x.as_u64()).unwrap_or(0);
+            let usn = val.get("usn").and_then(|x| x.as_i64()).unwrap_or(0);
+            out.insert(k.clone(), (id, usn));
+        }
+    }
+    out
+}
+
+/// 把当前读到的位置落盘：下次启动就能从断点续读，
+/// 而不是把「应用没开时新建的文件」全当历史丢掉。
+pub fn save_sync_state() {
     let Some(n) = NATIVE.get() else { return };
-    if n.syncing.swap(true, Ordering::SeqCst) {
+    let sync = n.sync.lock();
+    if sync.is_empty() {
         return;
     }
+    let mut obj = serde_json::Map::new();
+    for s in sync.iter() {
+        obj.insert(
+            format!("{}", s.journal.letter),
+            serde_json::json!({ "journal": s.journal.journal_id, "usn": s.journal.next_usn }),
+        );
+    }
+    let path = sync_state_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, serde_json::Value::Object(obj).to_string());
+}
 
+/// 补读断点之后的变更。返回并入索引的事件数。
+///
+/// 只在「同一个 USN 日志 + 断点还在有效区间」时成立；日志被删过/回绕过就返回 0，
+/// 由调用方退回「跳过历史」——那种情况下确实补不回来，只能重建。
+fn catch_up(s: &mut Syncer, idx: &mut Index) -> usize {
+    const MAX_EVENTS: usize = 2_000_000;
+    let mut applied = 0usize;
+    for _ in 0..4096 {
+        match s.pump(idx, 0, 0) {
+            Ok(0) => break,
+            Ok(k) => {
+                applied += k;
+                if applied >= MAX_EVENTS {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    applied
+}
+
+/// 给索引里的**每个**卷都挂上 USN 监听，并保证后台泵线程只有一个。
+///
+/// 早先只给 `volumes.first()`（第一个盘）挂，索引里其它盘的新建文件永远进不来；
+/// 现在按卷各挂一个 Syncer，每个 Syncer 只认自己卷的 FRN。
+///
+/// 重建索引后也会再调一次：这里会**重新**附着到新索引上（旧的 Syncer 连同
+/// FrnIndex 一起丢掉），泵线程复用，不会出现两份线程抢着写同一个索引。
+pub fn start_sync(app: AppHandle) {
+    let Some(n) = NATIVE.get() else { return };
+    let spawn = !n.syncing.swap(true, Ordering::SeqCst);
+
+    // 先只在本卷范围内附着，拿好 core 写锁就放，再动 n.sync，
+    // 保持「core → sync」这个唯一加锁顺序，避免和泵线程互等。
+    let letters: Vec<char> = {
+        let c = n.core.read();
+        c.idx.volumes.iter().filter_map(|v| v.chars().next()).collect()
+    };
+    let saved = read_sync_state();
+    let mut syncers: Vec<Syncer> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    let mut caught_up = 0usize;
     {
         let mut c = n.core.write();
-        match Syncer::attach(&mut c.idx, letter) {
-            Ok(mut s) => {
-                // 快照就是当前状态，历史变更不必重放。
-                s.skip_to_end();
-                *n.sync.lock() = Some(s);
+        for letter in letters {
+            match Syncer::attach(&mut c.idx, letter) {
+                Ok(mut s) => {
+                    let key = letter.to_ascii_uppercase().to_string();
+                    let resumed = match saved.get(&key) {
+                        Some((id, usn)) => s.resume_from(*id, *usn),
+                        None => false,
+                    };
+                    if resumed {
+                        // 断点还在：把应用没开期间的新建/删除/改名补进来
+                        caught_up += catch_up(&mut s, &mut c.idx);
+                    } else {
+                        // 没有断点（首次运行这一版、或断点对应的日志已被删掉）：
+                        // 从日志里还留着的最早一条开始重放。USN 是有序的，
+                        // 「建了又删」会按顺序抵消，「早就存在」的 CREATE 会因为
+                        // FRN 已命中而被忽略，所以重放是安全的；重放不到就只能重建。
+                        let first = s.journal.lowest_valid_usn;
+                        if first > 0 {
+                            s.journal.seek(first);
+                            let n = catch_up(&mut s, &mut c.idx);
+                            if n == 0 {
+                                s.skip_to_end();
+                            } else {
+                                caught_up += n;
+                            }
+                        } else {
+                            s.skip_to_end();
+                        }
+                    }
+                    syncers.push(s);
+                }
+                Err(e) => failed.push(format!("{letter}: {e}")),
             }
-            Err(e) => {
-                n.syncing.store(false, Ordering::SeqCst);
-                *n.notice.lock() = Some(format!("实时同步未启用：{e}"));
-                emit(&app, "tinker:sync-change", serde_json::json!({ "info": "", "error": e.to_string() }));
-                return;
-            }
+        }
+        if caught_up > 0 {
+            // 目录结构变了：路径 → id 的缓存、搜索结果都作废
+            c.places.clear();
+            c.meta.clear();
+            c.hits.clear();
+            c.view.clear();
         }
     }
 
-    emit(&app, "tinker:sync-change", serde_json::json!({ "info": format!("{letter}: 实时同步已启用") }));
+    if syncers.is_empty() {
+        n.syncing.store(false, Ordering::SeqCst);
+        *n.sync.lock() = Vec::new();
+        let msg = failed.join("；");
+        *n.notice.lock() = Some(format!("实时同步未启用：{msg}"));
+        emit(&app, "tinker:sync-change", serde_json::json!({ "info": "", "error": msg }));
+        return;
+    }
+
+    let names: Vec<String> = syncers.iter().map(|s| format!("{}:", s.journal.letter)).collect();
+    *n.sync.lock() = syncers;
+    // 这里**不能**写断点：索引要到退出/手动保存时才落盘，断点先写出去就等于
+    // 宣称「索引已包含到这条 USN」，一旦进程被杀，这段区间的变更就永久丢了。
+    // 断点统一由 save_db() 在索引落盘之后写。
+
+    let info = if caught_up > 0 {
+        format!("{} 实时同步已启用（补入 {caught_up} 条变更）", names.join(" / "))
+    } else {
+        format!("{} 实时同步已启用", names.join(" / "))
+    };
+    emit(&app, "tinker:sync-change", serde_json::json!({ "info": info }));
+    if !failed.is_empty() {
+        *n.notice.lock() = Some(format!("部分卷未同步：{}", failed.join("；")));
+    }
+
+    if !spawn {
+        return;
+    }
 
     std::thread::spawn(move || {
         let Some(n) = NATIVE.get() else { return };
-        let mut lost = false;
         loop {
             if n.stop.load(Ordering::SeqCst) || !n.syncing.load(Ordering::SeqCst) {
                 break;
             }
-            let mut abnormal = false;
+            let mut broken: Vec<char> = Vec::new();
+            let mut lost = false;
+            let mut recovered: Vec<(char, sscore::sync::Recovery)> = Vec::new();
+            let mut total = SyncStats::default();
             {
                 let mut sync = n.sync.lock();
-                if let Some(s) = sync.as_mut() {
-                    let mut c = n.core.write();
-                    match s.pump(&mut c.idx, 0, 0) {
-                        Ok(_) => {}
-                        Err(e) => {
-                            abnormal = true;
-                            if sscore::sync::Journal::is_journal_lost(&e) {
-                                lost = true;
-                            }
-                            *n.notice.lock() = Some(format!("实时同步中断：{e}"));
+                let mut c = n.core.write();
+                for s in sync.iter_mut() {
+                    let pumped = s.pump(&mut c.idx, 0, 0);
+                    // 日志回绕/被删：pump 已经重新定位并接着读了，这里只负责告知
+                    if let Some(r) = s.take_recovery() {
+                        recovered.push((s.journal.letter, r));
+                    }
+                    if let Err(e) = pumped {
+                        if sscore::sync::Journal::is_journal_lost(&e) {
+                            lost = true;
                         }
+                        // 走到这里说明重新定位也失败了（卷离线 / 权限不足），才是真的中断
+                        *n.notice.lock() =
+                            Some(format!("{}: 实时同步中断：{e}（重新挂载或重启应用后恢复）", s.journal.letter));
+                        broken.push(s.journal.letter);
                     }
-                    let changed = s.stats.added + s.stats.removed + s.stats.renamed;
-                    if changed > 0 {
-                        // 目录结构变了：路径 → id 的缓存必须作废
-                        c.places.clear();
-                        c.meta.clear();
-                    }
-                    *n.sync_stats.lock() = s.stats.clone();
+                    let st = &s.stats;
+                    total.rounds += st.rounds;
+                    total.events += st.events;
+                    total.added += st.added;
+                    total.removed += st.removed;
+                    total.renamed += st.renamed;
+                    total.revived += st.revived;
+                    total.recovered += st.recovered;
+                    total.skipped_usn += st.skipped_usn;
+                    total.busy_ms += st.busy_ms;
+                    total.last_round_us = total.last_round_us.max(st.last_round_us);
+                }
+                if total.added + total.removed + total.renamed > 0 {
+                    // 目录结构变了：路径 → id 的缓存必须作废
+                    c.places.clear();
+                    c.meta.clear();
                 }
             }
-            if abnormal {
-                n.syncing.store(false, Ordering::SeqCst);
+
+            // 自愈提示：告诉用户「跳过了哪一段」，别让人以为索引一直准确。
+            // 只写 notice（界面顶部通知条会展示），同步本身已经恢复了，不必弹窗。
+            for (letter, r) in recovered {
+                let msg = if r.rebuilt {
+                    format!("{letter}: USN 日志被重建，已从日志起点重新跟上；更早的变更需要重建索引")
+                } else {
+                    format!(
+                        "{letter}: USN 日志已回绕，跳过了 USN {}–{} 这一段；实时同步已自动恢复，必要时请重建索引",
+                        r.from, r.resume_at
+                    )
+                };
+                *n.notice.lock() = Some(msg);
+            }
+
+            if !broken.is_empty() {
+                // 只摘掉出问题的卷，其余卷继续保鲜
+                n.sync.lock().retain(|s| !broken.contains(&s.journal.letter));
+                if n.sync.lock().is_empty() {
+                    n.syncing.store(false, Ordering::SeqCst);
+                    emit(
+                        &app,
+                        "tinker:sync-change",
+                        serde_json::json!({ "info": "", "lost": lost, "error": "USN 日志不可读" }),
+                    );
+                    break;
+                }
                 emit(
                     &app,
                     "tinker:sync-change",
-                    serde_json::json!({ "info": "", "lost": lost, "error": "USN 日志不可读" }),
+                    serde_json::json!({ "info": "", "lost": lost, "error": "部分卷的 USN 日志不可读" }),
                 );
-                break;
             }
+            *n.sync_stats.lock() = total;
             std::thread::sleep(Duration::from_millis(250));
         }
     });
@@ -1304,7 +1905,67 @@ pub fn shutdown() {
 
 #[cfg(test)]
 mod tests {
-    use super::depth_under;
+    use super::{depth_under, init, is_webview_exe, mem_stats, trim_memory};
+
+    /// 内存页依赖真实 Win32 调用：工作集、系统内存、进程树都得有值，
+    /// 否则面板会显示一片 0。
+    #[test]
+    fn mem_stats_reads_process_and_system() {
+        init(std::env::temp_dir().join("sscore-mem-test.idx"));
+        let m = mem_stats();
+        assert!(m.working_set > 0, "工作集应为正");
+        assert!(m.peak_working_set >= m.working_set, "峰值不该小于当前");
+        assert!(m.sys_total > 0, "系统内存总量应为正");
+        assert!(m.sys_avail > 0 && m.sys_avail <= m.sys_total);
+        assert!(m.process_count >= 1, "至少要有本进程");
+        // 进程树合计在「整理内存」之后可能反而小于先前拍的单进程值
+        // （另一个测试线程正在 trim），这里只要求它有值。
+        assert!(m.total_working_set > 0);
+    }
+
+    /// 面板主数字必须是**专用工作集**（任务管理器「内存」列的口径）。
+    /// 专用工作集只会小于等于工作集，差额就是与别的进程共享的 DLL/映像页。
+    #[test]
+    fn private_working_set_is_reported() {
+        init(std::env::temp_dir().join("sscore-mem-test.idx"));
+        let m = mem_stats();
+        assert!(m.private_working_set > 0, "专用工作集应为正");
+        assert!(m.private_working_set <= m.working_set, "专用不该大于总工作集");
+        assert!(m.total_private_working_set > 0);
+        assert!(m.total_private_working_set <= m.total_working_set);
+    }
+
+    /// 界面进程要能被认出来：WebView2 的渲染/GPU/网络进程都是这个名字，
+    /// 主进程不能被误判成界面进程（否则面板会把引擎占用减成 0）。
+    #[test]
+    fn webview_exe_is_recognized() {
+        assert!(is_webview_exe("msedgewebview2.exe"));
+        assert!(is_webview_exe("MSEDGEWEBVIEW2.EXE"));
+        assert!(!is_webview_exe("tinker-search.exe"));
+        assert!(!is_webview_exe(""));
+    }
+
+    /// 面板给出的「全部进程」必须排除界面：进程树里只要有 WebView2，
+    /// 这一项就该严格小于「引擎 + 界面」的总和。
+    #[test]
+    fn mem_stats_excludes_webview() {
+        init(std::env::temp_dir().join("sscore-mem-test.idx"));
+        let m = mem_stats();
+        assert!(m.process_count >= 1);
+        assert!(m.total_working_set > 0);
+        if m.webview_count > 0 {
+            // 有界面进程在跑：两个口径必须分开记
+            assert!(m.webview_bytes > 0);
+            assert!(m.total_working_set + m.webview_bytes > m.total_working_set);
+        }
+    }
+
+    /// 整理内存返回「释放了多少」，不能是负数（失败时算 0）。
+    #[test]
+    fn trim_memory_returns_non_negative() {
+        init(std::env::temp_dir().join("sscore-mem-test.idx"));
+        assert!(trim_memory() >= 0);
+    }
 
     /// 排序分组依赖这个层级：1 = 当前目录的直接子项，2 = 孙项……
     #[test]

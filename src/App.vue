@@ -523,11 +523,8 @@ function usePlace(path: string) {
   void runSearch();
 }
 
-function homeOpen(path: string, isDir = false) {
-  if (isDir) {
-    void enterFolder(path);
-    return;
-  }
+/** 首页里的条目双击：文件夹也交给资源管理器打开 */
+function homeOpen(path: string) {
   api.openFile(path).catch((e) => ElMessage.error(String(e)));
 }
 
@@ -1028,74 +1025,10 @@ async function urlDelMode(name: string, notes: string[]) {
 
 /* ------------------------------ 文件操作 ------------------------------ */
 
-/** 当前目录拆成面包屑：盘符 › 一级 › 二级 …，每一级都能点回去 */
-const crumbs = computed(() => {
-  const p = scope.value;
-  if (!p) return [] as { name: string; path: string }[];
-  const s = p.replace(/\//g, "\\").replace(/\\+$/, "");
-  const out: { name: string; path: string }[] = [];
-  let acc = "";
-  for (const part of s.split("\\").filter(Boolean)) {
-    acc = acc ? `${acc}\\${part}` : part;
-    out.push({ name: part, path: acc });
-  }
-  return out;
-});
-
-/** 在应用内进入目录：目录变成搜索范围，空关键词直接浏览其内容 */
-async function enterFolder(path: string) {
-  const dir = path.replace(/\//g, "\\").replace(/\\+$/, "");
-  if (!dir) return;
-  scope.value = dir;
-  keyword.value = "";
-  chain.value = null;
-  ctx.value = null;
-  // 侧栏的「位置 / 磁盘」会和 scope 变成「且」条件，进入目录时先清掉
-  facetPlaces.value = [];
-  facetDrives.value = [];
-  sqlMode.value = false;
-  sqlData.value = null;
-  if (mode.value.type === 2) modeKey.value = "wildcard";
-  await applyFilter();
-  await runSearch("");
-}
-
-/** 当前目录的上一级；盘符根目录返回 null（再往上就回首页） */
-function parentOf(path: string): string | null {
-  const p = path.replace(/[\\/]+$/, "");
-  const i = p.lastIndexOf("\\");
-  if (i <= 0) return null;
-  const parent = p.slice(0, i);
-  if (/^[A-Za-z]:$/.test(parent)) return null;
-  return parent;
-}
-
-async function goUpFolder() {
-  if (!scope.value) return;
-  const up = parentOf(scope.value);
-  if (up) await enterFolder(up);
-  else await goHome();
-}
-
+/** 双击 / 回车：文件和文件夹都交回系统。目录不再在应用内下钻。 */
 async function openRow(r: Row) {
-  // 目录在应用内继续下钻，不再唤起资源管理器
-  if (r.is_dir) {
-    await enterFolder(r.path);
-    return;
-  }
-  // 文件夹快捷方式：目标目录在索引里就在应用内进入，否则交给系统打开
-  if ((r.ext || "").toLowerCase() === "lnk") {
-    try {
-      const link = await api.resolveLink(r.path);
-      if (link?.isDir && link.indexed && link.target) {
-        await enterFolder(link.target);
-        return;
-      }
-    } catch {
-      /* 解析失败就交给系统打开 */
-    }
-  }
   try {
+    // 快捷方式由后端解析目标，指向目录时直接打开那个目录
     await api.openFile(r.path);
   } catch (e) {
     ElMessage.error(String(e));
@@ -1342,7 +1275,9 @@ async function onEscape() {
     return;
   }
   if (scope.value) {
-    await goUpFolder();
+    // 限定目录（面包屑已去掉，这里只剩搜索框上的范围标签）
+    scope.value = null;
+    await runSearch("");
     return;
   }
   api.hide();
@@ -1426,7 +1361,16 @@ async function saveSettings(next: AppConfig) {
     await api.saveCfg(next);
     await api.alwaysOnTop(!!next.window.always_on_top);
     // 后端 config_save 已应用，这里再推一次保证立即生效；mock 环境没有该命令，忽略即可
-    api.setHotkey(next.window.shortcut || "None", !!next.window.double_ctrl).catch(() => {});
+    api
+      .setHotkey(next.window.shortcut || "None", !!next.window.double_ctrl)
+      .then((ok) => {
+        if (!ok) {
+          ElMessage.warning(
+            `快捷键「${next.window.shortcut}」没生效：多半已被其它程序占用，换个组合键试试`
+          );
+        }
+      })
+      .catch(() => {});
     if (themeChanged) ElMessage.success("设置已保存");
   } catch (e) {
     ElMessage.error(String(e));
@@ -1601,24 +1545,6 @@ defineExpose({ openSettings });
 
     <main class="main" :class="{ 'ov-dim': showOverlay && needAdmin }">
       <div class="results">
-        <nav v-if="scope" class="crumbs" aria-label="当前文件夹">
-          <button class="cb-home" title="回到首页" @click="goHome()">
-            <Icon name="location" :size="13" />
-          </button>
-          <template v-for="(c, i) in crumbs" :key="c.path">
-            <Icon name="chevron" :size="12" class="cb-sep" />
-            <button
-              class="cb-item"
-              :class="{ on: i === crumbs.length - 1 }"
-              :disabled="i === crumbs.length - 1"
-              :title="c.path"
-              @click="enterFolder(c.path)"
-            >
-              {{ c.name }}
-            </button>
-          </template>
-          <span class="cb-count">{{ total }} 项</span>
-        </nav>
         <HomeView
           v-if="browsingHome"
           :home="home"
@@ -1980,73 +1906,6 @@ defineExpose({ openSettings });
 }
 
 /* 目录面包屑：每级都可点回去，过长时横向滚动而不是把布局撑开 */
-.crumbs {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 1px;
-  padding: 7px 12px 6px;
-  border-bottom: 1px solid var(--border);
-  overflow-x: auto;
-  white-space: nowrap;
-  font-size: 12px;
-  scrollbar-width: none;
-}
-.crumbs::-webkit-scrollbar {
-  display: none;
-}
-.crumbs .cb-home {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: none;
-  width: 24px;
-  height: 24px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-3);
-  cursor: pointer;
-}
-.crumbs .cb-home:hover {
-  background: var(--hover);
-  color: var(--text-1);
-}
-.crumbs .cb-sep {
-  flex: none;
-  color: var(--text-3);
-  transform: rotate(-90deg);
-  opacity: 0.75;
-}
-.crumbs .cb-item {
-  flex: none;
-  max-width: 180px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-2);
-  font-size: 12px;
-  padding: 3px 7px;
-  cursor: pointer;
-}
-.crumbs .cb-item:hover:not(:disabled) {
-  background: var(--hover);
-  color: var(--text-1);
-}
-.crumbs .cb-item.on {
-  color: var(--text-1);
-  font-weight: 600;
-  cursor: default;
-}
-.crumbs .cb-count {
-  margin-left: auto;
-  flex: none;
-  padding-left: 12px;
-  color: var(--text-3);
-  font-size: 11px;
-}
 
 .sql-empty {
   flex: 1;

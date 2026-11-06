@@ -237,6 +237,10 @@ fn cmd_info(db: &PathBuf) -> i32 {
         idx.bytes_per_record()
     );
     println!("卷标        : {}", idx.volumes.join(", "));
+    println!(
+        "已隐藏      : {}（回收站/系统卷信息，不参与搜索）",
+        idx.hidden_count()
+    );
     println!("自检        : 通过");
     0
 }

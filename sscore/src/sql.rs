@@ -1040,7 +1040,7 @@ pub fn run(idx: &Index, sql: &str, filter: &Filter, limit: usize) -> Result<Tabl
             let end = ((c + 1) * CHUNK).min(n);
             let mut ctx = Ctx::new(idx, 0, &stats, &capped);
             for id in start..end {
-                if !idx.is_live(id) {
+                if !idx.is_visible(id) {
                     continue;
                 }
                 if !matches_filter(idx, id, filter) {

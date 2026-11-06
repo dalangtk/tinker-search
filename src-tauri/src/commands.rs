@@ -1,7 +1,7 @@
 //! Tauri 命令层：前端唯一可触达的入口，全部返回 `Result<T, String>`。
 
 use crate::config::{match_json, AppConfig};
-use crate::model::{IndexStats, Row, SearchStart};
+use crate::model::{DirListing, IndexStats, MemStat, Row, SearchStart};
 use crate::{hotkey, native, plugins, shell, vfs};
 use parking_lot::Mutex;
 use std::path::PathBuf;
@@ -246,6 +246,12 @@ pub async fn get_row(id: i32) -> Result<Row, String> {
     blocking(move || native::row_by_id(id)).await
 }
 
+/// 预览面板：列出选中文件夹的直接子项。
+#[tauri::command]
+pub async fn list_dir(path: String, limit: i32) -> Result<DirListing, String> {
+    blocking(move || native::list_dir(&path, limit)).await
+}
+
 /// 文件图标由系统 Shell 提供，内核不维护图标缓存，直接返回空让前端回退到通用图标。
 #[tauri::command]
 pub async fn get_icons(_ids: Vec<i32>, _size: i32) -> Result<Vec<serde_json::Value>, String> {
@@ -366,6 +372,18 @@ pub fn engine_prompt(_kind: i32) -> String {
 #[tauri::command]
 pub fn index_status() -> IndexStats {
     native::stats()
+}
+
+/// 「设置 → 性能与内存」：进程 / 索引 / 缓存的完整明细。
+#[tauri::command]
+pub async fn mem_stats() -> Result<MemStat, String> {
+    blocking(|| Ok(native::mem_stats())).await
+}
+
+/// 整理内存：把本进程的物理页交还系统，返回释放的工作集字节数。
+#[tauri::command]
+pub async fn trim_memory() -> Result<i64, String> {
+    blocking(|| Ok(native::trim_memory())).await
 }
 
 #[tauri::command]
@@ -553,9 +571,7 @@ pub async fn config_save(
     }
     state.save();
     // 设置面板改完快捷键立即生效，不用重启
-    if !hotkey::apply(&cfg.window.shortcut, cfg.window.double_ctrl) {
-        hotkey::apply("DoubleCtrl", cfg.window.double_ctrl);
-    }
+    hotkey::apply_or_fallback(&cfg.window.shortcut, cfg.window.double_ctrl);
     // 侧栏筛选与内核保持同步
     native::set_filter(&filter);
     Ok(())
@@ -659,7 +675,7 @@ pub fn elevate(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 双击 Ctrl 的键盘钩子是否已装上
+/// 全局快捷键是否在正常工作：组合键看注册结果，双击看低层钩子
 #[tauri::command]
 pub fn hotkey_hook_ok() -> bool {
     hotkey::hook_ok()
@@ -675,7 +691,7 @@ pub fn toggle_hotkey(on: bool) {
     hotkey::set_enabled(on);
 }
 
-/// 立即应用设置面板里的自定义快捷键，返回配置串是否合法。
+/// 立即应用设置面板里的自定义快捷键，返回是否真的生效（被别的程序占用时为 false）。
 /// `spec` 形如 `DoubleCtrl` / `Ctrl+Alt+S` / `Alt+Space` / `None`。
 #[tauri::command]
 pub fn set_hotkey(spec: String, enabled: bool) -> bool {

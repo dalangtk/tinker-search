@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import Icon from "./Icon.vue";
-import { formatCount } from "../utils/format";
+import { formatCount, formatSize } from "../utils/format";
 import type { IndexStats } from "../types";
 
 const props = defineProps<{
@@ -36,6 +36,13 @@ const elapsedText = computed(() => {
   const ms = props.elapsed;
   if (!Number.isFinite(ms) || ms < 0) return "";
   return ms >= 10 ? `${Math.round(ms)} ms` : `${Math.round(ms * 10) / 10} ms`;
+});
+
+/** 引擎侧内存（索引 + 同步表 + 缓冲），点开看明细 */
+const memText = computed(() => {
+  const s = props.stats;
+  if (!s?.ready || !s.memory_bytes) return "";
+  return formatSize(s.memory_bytes);
 });
 
 const idxText = computed(() => {
@@ -81,7 +88,7 @@ function pick(f: string) {
       <span
         v-else-if="props.stats?.ready && !props.stats.admin"
         class="nosync"
-        title="实时同步依赖 USN 日志，需要管理员权限。当前索引为静态快照，可在需要时以管理员身份重建。"
+        title="实时同步依赖 USN 日志，需要管理员权限。当前是静态快照：应用运行期间新建、改名、删除的文件都不会出现在结果里。以管理员身份重启即可恢复跟踪。"
       >
         <Icon name="info" :size="12" />索引只读
       </span>
@@ -152,6 +159,16 @@ function pick(f: string) {
         <span v-if="props.stats?.scanning" class="bar">
           <i :style="{ width: Math.min(100, Math.max(0, props.stats.progress)) + '%' }" />
         </span>
+      </button>
+
+      <button
+        v-if="memText"
+        class="idx mem"
+        title="性能与内存"
+        @click="emit('open-settings', 'memory')"
+      >
+        <Icon name="memory" :size="13" />
+        <span>{{ memText }}</span>
       </button>
 
       <button class="icon-btn" title="设置" @click="emit('open-settings')">

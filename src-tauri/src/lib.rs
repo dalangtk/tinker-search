@@ -203,6 +203,8 @@ pub fn run() {
     let builder = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // 全局快捷键插件必须先于 setup 注册：setup 里要用它绑定组合键
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             let handle = app.handle().clone();
 
@@ -265,12 +267,9 @@ pub fn run() {
             build_tray(&handle);
 
             // ---- 全局呼出快捷键 ----
-            // 钩子始终安装，靠配置串和开关控制是否响应，设置里改完立即生效。
+            // 组合键走 global-shortcut 插件（RegisterHotKey），双击修饰键才挂低层钩子。
             hotkey::install(handle.clone());
-            if !hotkey::apply(&cfg.window.shortcut, cfg.window.double_ctrl) {
-                // 配置里残留了非法值：回落到默认，别让热键彻底失灵
-                hotkey::apply("DoubleCtrl", cfg.window.double_ctrl);
-            }
+            hotkey::apply_or_fallback(&cfg.window.shortcut, cfg.window.double_ctrl);
 
             // 协议已注册的话，按当前 exe 路径刷新一次（程序挪位置后不用手动改注册表）
             if cfg.integration.protocol {
@@ -352,6 +351,7 @@ pub fn run() {
             commands::set_plugin_market_url,
             commands::get_rows,
             commands::get_row,
+            commands::list_dir,
             commands::get_icons,
             commands::get_preview_icon,
             commands::get_filters,
@@ -366,6 +366,8 @@ pub fn run() {
             commands::known_places,
             commands::engine_prompt,
             commands::index_status,
+            commands::mem_stats,
+            commands::trim_memory,
             commands::list_drives,
             commands::start_scan,
             commands::stop_scan,

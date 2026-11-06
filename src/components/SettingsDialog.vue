@@ -5,7 +5,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import Icon from "./Icon.vue";
 import { api } from "../api";
 import { formatSize, formatCount } from "../utils/format";
-import type { AppConfig, IndexStats, MarketEntry, PluginView } from "../types";
+import type { AppConfig, IndexStats, MarketEntry, MemStat, PluginView } from "../types";
 
 const props = defineProps<{
   visible: boolean;
@@ -203,6 +203,10 @@ const scanning = ref(false);
 const protocolOn = ref(false);
 const reindexDrives = ref<string[]>([]);
 const showPerf = ref(false);
+/** 性能与内存页数据 */
+const mem = ref<MemStat | null>(null);
+const memBusy = ref(false);
+let memTimer: number | undefined;
 /** 引擎最近一次错误，仅在「关于」页做诊断展示 */
 const lastErr = ref("");
 /** 全局呼出快捷键的键盘钩子是否真的装上了 */
@@ -321,9 +325,98 @@ async function loadIndexStuff() {
   }
 }
 
+/* ------------------------------ 性能与内存 ------------------------------ */
+
+/** 占比条配色：够区分，且在明暗主题下都能看清 */
+const MEM_COLORS = [
+  "#5a5bd6",
+  "#4aa8ff",
+  "#38b2a6",
+  "#f0b429",
+  "#e5645c",
+  "#8b7cf6",
+  "#2f9e6f",
+  "#d6558b",
+  "#7c8aa0",
+  "#b0724a",
+];
+
+/** 引擎侧内存构成：索引各列 + 同步映射 + USN 缓冲 + 查询缓存 */
+const memSegments = computed(() => {
+  const m = mem.value;
+  if (!m) return [] as { name: string; bytes: number; pct: number; color: string }[];
+  const raw = [
+    ...m.index_parts.map((p) => ({ name: p.name, bytes: p.bytes })),
+    { name: "同步映射", bytes: m.frn_map_bytes },
+    { name: "USN 缓冲", bytes: m.journal_bytes },
+    { name: "查询缓存", bytes: m.cache_bytes },
+  ].filter((x) => x.bytes > 0);
+  const total = raw.reduce((a, b) => a + b.bytes, 0) || 1;
+  return raw.map((x, i) => ({
+    ...x,
+    pct: (x.bytes / total) * 100,
+    color: MEM_COLORS[i % MEM_COLORS.length],
+  }));
+});
+
+const memEngineTotal = computed(() => memSegments.value.reduce((a, b) => a + b.bytes, 0));
+
+/** 工作集与专用工作集的差额：跟别的进程共用的 DLL / 映像页。
+ *  任务管理器「内存」列不算这部分，所以它比工作集小。 */
+const memShared = computed(() => {
+  const m = mem.value;
+  if (!m) return 0;
+  return Math.max(0, (m.working_set || 0) - (m.private_working_set || 0));
+});
+
+async function loadMem() {
+  try {
+    mem.value = await api.memStats();
+  } catch {
+    mem.value = null;
+  }
+}
+
+function stopMemTimer() {
+  if (memTimer !== undefined) {
+    clearInterval(memTimer);
+    memTimer = undefined;
+  }
+}
+
+async function trimMem() {
+  memBusy.value = true;
+  try {
+    const freed = await api.trimMemory();
+    await loadMem();
+    ElMessage.success(
+      freed > 0 ? `已整理，工作集回收 ${formatSize(freed)}` : "已经足够紧凑，没有可回收的部分"
+    );
+  } catch (e) {
+    ElMessage.error(String(e));
+  } finally {
+    memBusy.value = false;
+  }
+}
+
+// 内存页开着就每 2 秒刷一次，便于观察搜索/同步后的变化；离开就停，别空转
+watch(
+  [() => props.visible, tab],
+  ([v, t]) => {
+    stopMemTimer();
+    if (v && t === "memory") {
+      void loadMem();
+      memTimer = window.setInterval(() => void loadMem(), 2000);
+    }
+  },
+  { immediate: true }
+);
+onUnmounted(stopMemTimer);
+
 const TABS = [
   { key: "search", label: "搜索匹配", icon: "search" },
   { key: "index", label: "索引管理", icon: "database" },
+  { key: "memory", label: "性能与内存", icon: "memory" },
   { key: "appearance", label: "外观与窗口", icon: "eye" },
   { key: "plugins", label: "插件", icon: "grid" },
   { key: "about", label: "关于", icon: "info" },
@@ -686,6 +779,152 @@ function openPath(kind: string) {
               </div>
             </div>
 
+            <!-- ============ 性能与内存 ============ -->
+            <div v-show="tab === 'memory'" class="pane">
+              <div class="cards four">
+                <div class="card">
+                  <div class="cl">主进程内存</div>
+                  <div class="cv num">{{ formatSize(mem?.private_working_set || 0) }}</div>
+                  <div class="cs">与任务管理器同口径 · 峰值 {{ formatSize(mem?.peak_working_set || 0) }}</div>
+                </div>
+                <div class="card">
+                  <div class="cl">系统内存</div>
+                  <div class="cv num">
+                    {{ formatSize((mem?.sys_total || 0) - (mem?.sys_avail || 0)) }}
+                  </div>
+                  <div class="cs">
+                    共 {{ formatSize(mem?.sys_total || 0) }} · {{ mem?.sys_load || 0 }}%
+                  </div>
+                </div>
+                <div class="card">
+                  <div class="cl">索引内存</div>
+                  <div class="cv num">{{ formatSize(mem?.index_bytes || 0) }}</div>
+                  <div class="cs">
+                    {{ formatCount(mem?.records || 0) }} 条 ·
+                    {{ (mem?.bytes_per_record || 0).toFixed(1) }} 字节/条
+                  </div>
+                </div>
+                <div class="card" :title="stats?.db_path">
+                  <div class="cl">索引文件</div>
+                  <div class="cv num">{{ formatSize(mem?.db_file_bytes || 0) }}</div>
+                  <div class="cs">读取耗时 {{ mem?.load_ms || 0 }} ms</div>
+                </div>
+              </div>
+
+              <div class="memact">
+                <button class="primary sm" :disabled="memBusy" @click="trimMem">
+                  <Icon name="memory" :size="13" />整理内存
+                </button>
+                <button class="ghost sm" @click="loadMem">
+                  <Icon name="refresh" :size="13" />刷新
+                </button>
+                <span class="memn">
+                  提交 {{ formatSize(mem?.private_bytes || 0) }} · 整理只回收物理页，索引不会丢
+                </span>
+              </div>
+
+              <div class="group">
+                <div class="gh">
+                  引擎内存构成
+                  <span class="ghsum">合计 {{ formatSize(memEngineTotal) }}</span>
+                </div>
+                <div class="membar">
+                  <span
+                    v-for="s in memSegments"
+                    :key="s.name"
+                    class="seg"
+                    :style="{ width: s.pct + '%', background: s.color }"
+                    :title="`${s.name} ${formatSize(s.bytes)}`"
+                  />
+                </div>
+                <div class="memlegend">
+                  <div v-for="s in memSegments" :key="s.name" class="li">
+                    <span class="sw" :style="{ background: s.color }" />
+                    <span class="nm">{{ s.name }}</span>
+                    <span class="sz num">{{ formatSize(s.bytes) }}</span>
+                    <span class="pc num">{{ s.pct.toFixed(1) }}%</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="group">
+                <div class="gh">明细</div>
+                <div class="kv">
+                  <span class="k">记录</span>
+                  <span class="v num">
+                    {{ formatCount(mem?.records || 0) }} 条（目录
+                    {{ formatCount(mem?.dirs || 0) }} / 文件 {{ formatCount(mem?.files || 0) }}）
+                    <span class="hint">
+                      隐藏 {{ formatCount(mem?.hidden_records || 0) }} · 墓碑
+                      {{ formatCount(mem?.tomb_records || 0) }}
+                    </span>
+                  </span>
+                </div>
+                <div class="kv">
+                  <span class="k">界面渲染</span>
+                  <span class="v num">
+                    {{ formatSize(mem?.webview_private_bytes || 0) }}
+                    <span class="hint">
+                      WebView2 {{ mem?.webview_count || 0 }} 个进程，未计入上面的统计
+                    </span>
+                  </span>
+                </div>
+                <div class="kv">
+                  <span class="k">共享页</span>
+                  <span class="v num">
+                    {{ formatSize(memShared) }}
+                    <span class="hint">
+                      工作集 {{ formatSize(mem?.working_set || 0) }} 里与系统 DLL 等共用的页，任务管理器不计入
+                    </span>
+                  </span>
+                </div>
+                <div class="kv">
+                  <span class="k">同步映射</span>
+                  <span class="v num">
+                    {{ formatSize(mem?.frn_map_bytes || 0) }}
+                    <span class="hint">FRN → 记录下标，实时同步用</span>
+                  </span>
+                </div>
+                <div class="kv">
+                  <span class="k">USN 缓冲</span>
+                  <span class="v num">
+                    {{ formatSize(mem?.journal_bytes || 0) }}
+                    <span class="hint">每个已挂卷 1 MB 的读缓冲</span>
+                  </span>
+                </div>
+                <div class="kv">
+                  <span class="k">查询缓存</span>
+                  <span class="v num">
+                    {{ formatSize(mem?.cache_bytes || 0) }}
+                    <span class="hint">命中集 / 重排视图 / 排序元数据</span>
+                  </span>
+                </div>
+
+                <div class="kv">
+                  <span class="k">系统内存</span>
+                  <span class="v">
+                    <span class="sysline">
+                      <span class="sysbar">
+                        <span :style="{ width: (mem?.sys_load || 0) + '%' }" />
+                      </span>
+                      <span class="num">
+                        {{ formatSize((mem?.sys_total || 0) - (mem?.sys_avail || 0)) }} /
+                        {{ formatSize(mem?.sys_total || 0) }} · {{ mem?.sys_load || 0 }}%
+                      </span>
+                    </span>
+                  </span>
+                </div>
+                <div class="kv">
+                  <span class="k">实时同步</span>
+                  <span class="v">
+                    {{ mem?.syncing ? "运行中" : "未启用（需要管理员）" }}
+                    <span class="hint">{{ mem?.sync_text }}</span>
+                  </span>
+                </div>
+              </div>
+
+            </div>
+
             <!-- ============ 外观 ============ -->
             <div v-show="tab === 'appearance'" class="pane">
               <div class="group">
@@ -753,7 +992,7 @@ function openPath(kind: string) {
                     <div class="t">呼出快捷键</div>
                     <div class="d">
                       当前：{{ shortcutLabel(draft.window.shortcut) }}
-                      <span v-if="hookOk === false" class="hk-warn">（键盘钩子未安装，可能被安全软件拦截）</span>
+                      <span v-if="hookOk === false" class="hk-warn">（没生效：可能已被其它程序占用，或被安全软件拦截）</span>
                     </div>
                   </div>
                   <div class="hk-actions">
@@ -948,7 +1187,7 @@ function openPath(kind: string) {
               </div>
 
               <div class="group">
-                <div class="kv"><span class="k">应用版本</span><span class="v num">1.0.1</span></div>
+                <div class="kv"><span class="k">应用版本</span><span class="v num">1.0.3</span></div>
                 <div class="kv">
                   <span class="k">搜索引擎</span>
                   <span class="v">内置内核（sscore，Rust 原生 + USN 实时同步）</span>
@@ -976,8 +1215,8 @@ function openPath(kind: string) {
                       hookOk === null
                         ? "—"
                         : hookOk
-                          ? "双击 Ctrl 已就绪"
-                          : "键盘钩子未装上（可能被安全软件拦截）"
+                          ? "已就绪"
+                          : "未生效（可能被其它程序占用，或被安全软件拦截）"
                     }}
                   </span>
                 </div>
@@ -1204,6 +1443,126 @@ code {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 10px;
+}
+/* 内存页四张卡：窗口 880px 宽刚好一行放下 */
+.cards.four {
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+.cards.four .card {
+  padding: 10px 11px;
+}
+.cards.four .cv {
+  font-size: 15.5px;
+}
+.cs {
+  margin-top: 3px;
+  font-size: 10.5px;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.memact {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: -4px;
+}
+.primary.sm,
+.ghost.sm {
+  height: 26px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+.memn {
+  font-size: 11px;
+  color: var(--text-3);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ghsum {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--text-2);
+}
+.membar {
+  display: flex;
+  height: 12px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--panel-3);
+  border: 1px solid var(--border);
+}
+.membar .seg {
+  height: 100%;
+  min-width: 1px;
+  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.28);
+}
+.memlegend {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px 18px;
+  padding-top: 9px;
+}
+.memlegend .li {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 2px;
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+.memlegend .sw {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex: none;
+}
+.memlegend .nm {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.memlegend .sz {
+  font-size: 10.5px;
+  color: var(--text-2);
+}
+.memlegend .pc {
+  width: 44px;
+  text-align: right;
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+.hint {
+  margin-left: 8px;
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+.sysline {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.sysbar {
+  flex: 1;
+  max-width: 170px;
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--panel-3);
+  border: 1px solid var(--border);
+}
+.sysbar > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
 }
 .card {
   background: var(--panel-2);

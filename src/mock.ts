@@ -11,6 +11,9 @@ const NAMES: [string, string, number, string][] = [
   ["会议纪要 2026-10-28.md", "D:\\Work\\会议", 4_120, "md"],
   ["客户名单.csv", "D:\\Work\\销售", 33_902, "csv"],
   ["Windows", "C:\\", 0, ""],
+  ["System32", "C:\\Windows", 0, ""],
+  ["explorer.exe", "C:\\Windows", 4_812_800, "exe"],
+  ["win.ini", "C:\\Windows", 2_048, "ini"],
   ["Program Files", "C:\\", 0, ""],
   ["setup-x64.msi", "D:\\Downloads", 88_901_221, "msi"],
   ["背景音乐-轻快.flac", "E:\\Media\\音频", 42_118_004, "flac"],
@@ -33,7 +36,7 @@ export const MOCK_ROWS = Array.from({ length: 4200 }, (_, i) => {
   return {
     id: i + 1,
     name: finalName,
-    path: `${parent}\\${finalName}`,
+    path: `${parent.replace(/\\+$/, "")}\\${finalName}`,
     parent,
     ext,
     size,
@@ -248,6 +251,55 @@ export async function mockInvoke(cmd: string, args: any = {}): Promise<any> {
       return JSON.parse(JSON.stringify(DEFAULT_CFG));
     case "config_save":
       return null;
+    case "mem_stats": {
+      const parts = [
+        { name: "父指针", bytes: 19_100_000 },
+        { name: "名字偏移", bytes: 19_100_000 },
+        { name: "名字长度", bytes: 9_600_000 },
+        { name: "卷号", bytes: 9_600_000 },
+        { name: "标志位", bytes: 4_800_000 },
+        { name: "文件号", bytes: 38_300_000 },
+        { name: "名字池", bytes: 121_200_000 },
+      ];
+      const total = parts.reduce((a, p) => a + p.bytes, 0);
+      return {
+        private_working_set: 282_000_000,
+        working_set: 325_000_000,
+        peak_working_set: 341_000_000,
+        private_bytes: 352_000_000,
+        total_working_set: 325_000_000,
+        total_private_working_set: 282_000_000,
+        process_count: 1,
+        webview_bytes: 226_000_000,
+        webview_private_bytes: 188_000_000,
+        webview_count: 4,
+        sys_total: 34_359_738_368,
+        sys_avail: 18_253_611_008,
+        sys_load: 47,
+        index_bytes: total,
+        index_parts: parts.map((p) => ({
+          ...p,
+          per_mille: Math.round((p.bytes * 1000) / total),
+        })),
+        frn_map_bytes: 20_100_000,
+        journal_bytes: 3_145_728,
+        cache_bytes: 1_800_000,
+        db_file_bytes: 232_461_356,
+        records: 5_019_159,
+        dirs: 973_897,
+        files: 4_045_262,
+        hidden_records: 32_272,
+        tomb_records: 11_408,
+        bytes_per_record: total / 5_019_159,
+        indexed_volumes: "C:, D:, E:",
+        load_ms: 102,
+        syncing: true,
+        sync_text: "同步 3 轮 / 事件 12 / 新增 3 / 删除 1 / 上一轮 8 µs",
+        admin: true,
+      };
+    }
+    case "trim_memory":
+      return 128_000_000;
     case "index_status":
       return {
         ready: true,
@@ -308,6 +360,15 @@ export async function mockInvoke(cmd: string, args: any = {}): Promise<any> {
         ...r,
         hl_file: args.__kw ? [] : r.hl_file,
       }));
+    }
+    case "list_dir": {
+      const p = String(args.path ?? "")
+        .replace(/\//g, "\\")
+        .replace(/\\+$/, "")
+        .toLowerCase();
+      const kids = MOCK_ROWS.filter((r) => r.parent.replace(/\\+$/, "").toLowerCase() === p);
+      kids.sort((a, b) => Number(b.is_dir) - Number(a.is_dir) || a.name.localeCompare(b.name));
+      return { total: kids.length, rows: kids.slice(0, args.limit ?? 200) };
     }
     case "get_icons":
       return [];
